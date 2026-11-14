@@ -1,0 +1,14 @@
+# Large binaries: fetched or generated, see README
+Models/
+Vendor/
+tools/.venv/
+tools/work/
+# Xcode
+Eyes.xcodeproj/
+build/
+build-*/
+# iCloud conflict copies of the generated project
+Eyes *.xcodeproj/
+DerivedData/
+Config/Local.xcconfig
+.DS_Store

@@ -1,0 +1,79 @@
+name: Eyes
+options:
+  bundleIdPrefix: dev.eyeshack
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "15.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Eyes:
+    type: application
+    platform: iOS
+    sources:
+      - path: Eyes
+      - path: Models/yoloe26m.mlpackage
+        buildPhase: sources
+      - path: Models/arcface_r50.mlpackage
+        buildPhase: sources
+      - path: Models/dinov3_s.mlpackage
+        buildPhase: sources
+      - path: Models/LFM3-VL-2B-QAD-Q4_0.gguf
+        buildPhase: resources
+      - path: Models/mmproj-LFM3-VL-2B-Q8_0.gguf
+        buildPhase: resources
+    dependencies:
+      - framework: Vendor/llama.xcframework
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(EYES_BUNDLE_ID)
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTED_PLATFORMS: iphoneos
+        SUPPORTS_MACCATALYST: NO
+        # Pixel loops (image warps, mask shading) are unusably slow unoptimised, even while debugging.
+        SWIFT_OPTIMIZATION_LEVEL: -O
+        INFOPLIST_KEY_CFBundleDisplayName: Private Eye
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_NSCameraUsageDescription: Private Eye looks through the camera to describe what is in front of you.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Private Eye listens to your question while you hold the button.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Private Eye turns your spoken question into text on this device.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # The interface is designed dark (white text over the camera); this keeps the launch screen and
+        # sheets dark for users in Light Mode.
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+  EyesCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: EyesCLI
+      # Everything below is shared with the app, so it must also compile for macOS.
+      - path: Eyes/LLM
+      - path: Eyes/Vision
+        excludes: ["CameraController.swift"]
+      - path: Eyes/Memory
+      - path: Eyes/Haptics
+        optional: true
+      - path: Eyes/Surroundings.swift
+      - path: Eyes/SceneDescription.swift
+    dependencies:
+      - framework: Vendor/llama.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: eyes-cli
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path"

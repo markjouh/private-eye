@@ -1,0 +1,5 @@
+// Shared build settings. Put your own signing team in Config/Local.xcconfig (not committed):
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   EYES_BUNDLE_ID = dev.yourname.eyes
+EYES_BUNDLE_ID = dev.eyeshack.eyes
+#include? "Local.xcconfig"
