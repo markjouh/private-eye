@@ -266,10 +266,12 @@ final class MemoryEngine: @unchecked Sendable {
     }
 
     /// Looks for one belonging in the given frames, newest first; nil when it is in none of them.
-    func find(_ belonging: Belonging, in shots: [Snapshot]) async -> FoundBelonging? {
+    /// `logging` prints every region's scores: right for one question, too much for a search that
+    /// looks three times a second.
+    func find(_ belonging: Belonging, in shots: [Snapshot], logging: Bool = true) async -> FoundBelonging? {
         for shot in shots {
             let regions = BelongingTargeting.searchCandidates(in: shot.detections, label: belonging.label)
-            if let found = await run({ self.match(regions, in: shot, wanted: [belonging], logging: true).first }) { return found }
+            if let found = await run({ self.match(regions, in: shot, wanted: [belonging], logging: logging).first }) { return found }
         }
         return nil
     }

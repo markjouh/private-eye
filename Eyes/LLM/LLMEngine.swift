@@ -14,6 +14,17 @@ struct LLMStats {
     var ttftMs = 0.0         // from answer() call to first generated token
     var generatedTokens = 0
     var tokensPerSecond = 0.0
+    // Set by `ingest(frames:)` only, where the two halves of `imageMs` are timed apart: the vision
+    // encoder could run ahead of the question, as frames arrive; the prefill cannot.
+    var frames = 0
+    var encodeMs = 0.0       // vision encoder
+    var prefillMs = 0.0      // language model reading the system prompt, timestamps and frame tokens
+}
+
+/// One frame of a short clip, and when it was taken in seconds from the clip's first frame.
+struct VideoFrame {
+    let image: RGBImage
+    let seconds: Double
 }
 
 /// Tightly packed 8-bit RGB pixels, the input format of the vision encoder.
@@ -86,6 +97,10 @@ final class LLMEngine {
     private(set) var stateBytes = 0
     private(set) var closeUpTiming = ""
 
+    /// The name of the model file without its extension ("LFM3-VL-2B-QAD-Q4_0"): what was measured
+    /// about one model does not carry over to another, and this says which one is loaded.
+    let modelFile: String
+
     private let model: OpaquePointer
     private let ctx: OpaquePointer
     private let mctx: OpaquePointer
@@ -110,6 +125,7 @@ final class LLMEngine {
             throw LLMError("could not load model at \(modelPath)")
         }
         self.model = model
+        modelFile = URL(fileURLWithPath: modelPath).deletingPathExtension().lastPathComponent
         vocab = llama_model_get_vocab(model)
         bareQuestions = AnswerStyle.answersBareQuestion(modelFile: (modelPath as NSString).lastPathComponent)
 
@@ -182,6 +198,126 @@ final class LLMEngine {
         stats.imageMs = Date().timeIntervalSince(start) * 1000
     }
 
+    /// What the last `ingest(frames:)` put in front of the question, with each run of frame tokens
+    /// shown as its count ("[192]"), for checking the layout against llama.cpp's own.
+    private(set) var videoLayout = ""
+
+    /// Starts a new turn about a short clip rather than one image: clears the context, then
+    /// evaluates the system prompt and `frames`, oldest first.
+    ///
+    /// The layout is the one LFM3-VL was trained on for video, as llama.cpp builds it
+    /// (MTMD_VIDEO_TEMPLATE_LFM3): frames go in pairs, each pair under a "<1.2 seconds>" timestamp
+    /// (the mean of its two times), and the vision encoder merges a pair into one frame's worth of
+    /// tokens, so two frames cost what one does. An odd frame out stands alone at the end. Only
+    /// the timestamps are worked out here, because keyframes are not evenly spaced; the markers
+    /// around the clip and around each pair are added by mtmd.
+    func ingest(frames: [VideoFrame]) throws {
+        guard !frames.isEmpty else { throw LLMError("no frames") }
+        cancelled.pointee = false
+        stats = LLMStats()
+        stats.frames = frames.count
+        videoLayout = ""
+        llama_memory_clear(llama_get_memory(ctx), true)
+        llama_sampler_reset(sampler)
+        nPast = 0
+
+        let start = Date()
+        let feed = VideoFeed(frames)
+        guard let clip = mtmd_bitmap_init_lazy(mctx, "clip", Unmanaged.passUnretained(feed).toOpaque(), VideoFeed.next) else {
+            throw LLMError("could not create clip")
+        }
+        defer { mtmd_bitmap_free(clip) }
+        mtmd_bitmap_set_is_video(clip, true)
+
+        guard let chunks = mtmd_input_chunks_init() else { throw LLMError("out of memory") }
+        defer { mtmd_input_chunks_free(chunks) }
+        let marker = String(cString: mtmd_default_marker())
+        let system = systemPrompt.isEmpty ? "" : "<|im_start|>system\n\(systemPrompt)<|im_end|>\n"
+        let prompt = "\(bosText)\(system)<|im_start|>user\n\(marker)"
+        var bitmaps: [OpaquePointer?] = [clip]
+        // The frames are read through `feed` during this call and not after it.
+        let rc = withExtendedLifetime(feed) {
+            prompt.withCString { cText -> Int32 in
+                var input = mtmd_input_text(text: cText, text_len: strlen(cText), add_special: false, parse_special: true)
+                return mtmd_tokenize(mctx, chunks, &input, &bitmaps, bitmaps.count)
+            }
+        }
+        guard rc == 0 else { throw LLMError("tokenize failed (\(rc))") }
+
+        // Chunk by chunk rather than through `mtmd_helper_eval_chunks`, so that encoding the frames
+        // and reading them into the language model are timed apart.
+        for index in 0..<mtmd_input_chunks_size(chunks) {
+            guard let chunk = mtmd_input_chunks_get(chunks, index) else { continue }
+            if cancelled.pointee { throw LLMError("cancelled") }
+            let began = Date()
+            var newPast = nPast
+            if mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT {
+                var count = 0
+                if let tokens = mtmd_input_chunk_get_tokens_text(chunk, &count) {
+                    let bytes = (0..<count).flatMap { LLMEngine.piece(vocab, tokens[$0], special: true) ?? [] }
+                    videoLayout += String(decoding: bytes, as: UTF8.self)
+                }
+                let rc = mtmd_helper_eval_chunk_single(mctx, ctx, chunk, nPast, 0, nBatch, false, &newPast)
+                guard rc == 0 else { throw LLMError(cancelled.pointee ? "cancelled" : "eval failed (\(rc))") }
+                stats.prefillMs += Date().timeIntervalSince(began) * 1000
+            } else {
+                videoLayout += "[\(mtmd_input_chunk_get_n_tokens(chunk))]"
+                guard mtmd_encode_chunk(mctx, chunk) == 0 else {
+                    throw LLMError(cancelled.pointee ? "cancelled" : "could not encode frames")
+                }
+                let encoded = Date()
+                let rc = mtmd_helper_decode_image_chunk(mctx, ctx, chunk, mtmd_get_output_embd(mctx), nPast, 0, nBatch, &newPast, nil, nil)
+                guard rc == 0 else { throw LLMError(cancelled.pointee ? "cancelled" : "eval failed (\(rc))") }
+                stats.encodeMs += encoded.timeIntervalSince(began) * 1000
+                stats.prefillMs += Date().timeIntervalSince(encoded) * 1000
+            }
+            nPast = newPast
+        }
+        stats.imageTokens = Int(mtmd_helper_get_n_tokens(chunks))
+        stats.imageMs = Date().timeIntervalSince(start) * 1000
+    }
+
+    /// Hands a clip to `mtmd_tokenize` piece by piece: a timestamp, then the frame or two it covers.
+    private final class VideoFeed {
+        enum Piece {
+            case text(String)
+            case frame(RGBImage)
+        }
+        let pieces: [Piece]
+
+        init(_ frames: [VideoFrame]) {
+            var pieces: [Piece] = []
+            for first in stride(from: 0, to: frames.count, by: 2) {
+                let group = frames[first..<min(first + 2, frames.count)]
+                let middle = group.map(\.seconds).reduce(0, +) / Double(group.count)
+                pieces.append(.text(String(format: "<%.1f seconds>", middle)))
+                pieces += group.map { .frame($0.image) }
+            }
+            self.pieces = pieces
+        }
+
+        /// Called by mtmd for piece 0, 1, 2… until it is told there are no more (-1). mtmd frees
+        /// what it is given: text must be malloc'd, and a bitmap copies its pixels.
+        static let next: mtmd_bitmap_lazy_callback = { index, feed, bitmap, text in
+            guard let feed else { return -2 }
+            let pieces = Unmanaged<VideoFeed>.fromOpaque(feed).takeUnretainedValue().pieces
+            guard index < pieces.count else { return -1 }
+            switch pieces[index] {
+            case .text(let stamp):
+                text?.pointee = strdup(stamp)
+            case .frame(let image):
+                guard let frame = image.pixels.withUnsafeBufferPointer({
+                    mtmd_bitmap_init(UInt32(image.width), UInt32(image.height), $0.baseAddress)
+                }) else { return -2 }
+                // Both are needed for a pair to be merged.
+                mtmd_bitmap_set_mergeable(frame, true)
+                mtmd_bitmap_set_is_video(frame, true)
+                bitmap?.pointee = frame
+            }
+            return 0
+        }
+    }
+
     /// True when the ingested image is a close-up of one thing (something held up to the camera, a
     /// sign, a laptop filling the view) rather than a scene. The model's own judgement, asked as a
     /// yes/no: on 78 taps saved from the phone it agreed with a person looking at the same frames
@@ -216,6 +352,51 @@ final class LLMEngine {
         let reply = try answer(question: AnswerStyle.closeUpQuestion, maxTokens: 1)
         asked = Date()
         return reply.lowercased().hasPrefix("yes")
+    }
+
+    /// How sure the model is that the answer to a yes/no `question` about what was ingested is yes,
+    /// from 0 to 1. Nothing is generated: the question is evaluated and the chance that the reply
+    /// would open with "yes" is read off the model's next-word scores. That gives a number to set
+    /// a bar on, where a sampled word gives only the side it fell.
+    ///
+    /// It is the chance of "yes" among everything the model might say, not just against "no", so
+    /// a reply that would open with neither does not pass for a yes. (On 1,045 checks of frames
+    /// from the phone the two ways of counting gave the same results.)
+    ///
+    /// The context is left holding the question, so this ends the turn: ingest again before
+    /// asking anything else.
+    func yesProbability(question: String, suffix: String = AnswerStyle.closeUpSuffix) throws -> Float {
+        let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = "\(asked)\(suffix.isEmpty ? "" : "\n" + suffix)<|im_end|>\n<|im_start|>assistant\n<think></think>"
+        stats.questionTokens = try eval(prompt, bitmaps: [], logitsLast: true)
+        guard let logits = llama_get_logits_ith(ctx, -1) else { throw LLMError("no scores for the next word") }
+        let scores = UnsafeBufferPointer(start: logits, count: Int(llama_vocab_n_tokens(vocab)))
+        guard let top = scores.max() else { throw LLMError("no scores for the next word") }
+        // Relative to the largest, so the exponentials cannot overflow.
+        let all = scores.reduce(Float(0)) { $0 + exp($1 - top) }
+        let yes = yesTokens.reduce(Float(0)) { $0 + exp(scores[Int($1)] - top) }
+        let no = noTokens.reduce(Float(0)) { $0 + exp(scores[Int($1)] - top) }
+        yesAgainstNo = yes / max(yes + no, .leastNormalMagnitude)
+        yesOrNo = (yes + no) / all
+        return yes / all
+    }
+
+    /// From the last `yesProbability`, for measuring: the chance of yes counted against no alone,
+    /// and how much of the model's next word was either of them.
+    private(set) var yesAgainstNo: Float = 0
+    private(set) var yesOrNo: Float = 0
+
+    /// The single tokens that begin an answer of yes (and of no), however capitalised or spaced.
+    private lazy var yesTokens = singleTokens(for: "Yes")
+    private lazy var noTokens = singleTokens(for: "No")
+
+    private func singleTokens(for word: String) -> [llama_token] {
+        let found = [word, word.lowercased(), " " + word, " " + word.lowercased()].compactMap { text -> llama_token? in
+            var tokens = [llama_token](repeating: 0, count: 4)
+            let count = llama_tokenize(vocab, text, Int32(text.utf8.count), &tokens, Int32(tokens.count), false, false)
+            return count == 1 ? tokens[0] : nil
+        }
+        return Array(Set(found))
     }
 
     /// Evaluates `question` against the ingested image and generates the reply. The model is given

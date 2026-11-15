@@ -7,11 +7,19 @@ import SwiftUI
 final class DetectionPacer: @unchecked Sendable {
     private let lock = NSLock()
     private var busy = false
+    private var checking = false
     private var last = Date.distantPast
 
+    /// True from the start of a press until its reply has been generated.
     var modelBusy: Bool {
         get { lock.lock(); defer { lock.unlock() }; return busy }
         set { lock.lock(); busy = newValue; lock.unlock() }
+    }
+
+    /// True while a search has the model looking at a frame.
+    var watchChecking: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return checking }
+        set { lock.lock(); checking = newValue; lock.unlock() }
     }
 
     /// True when enough time has passed since the last detection (and records this one).
@@ -19,7 +27,7 @@ final class DetectionPacer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         // About 10 boxes a second normally, 4 when the phone is hot, 2 while the model is answering.
         let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
-        let interval = busy ? 0.5 : (hot ? 0.25 : 0.1)
+        let interval = busy || checking ? 0.5 : (hot ? 0.25 : 0.1)
         guard Date().timeIntervalSince(last) >= interval else { return false }
         last = Date()
         return true
@@ -46,8 +54,12 @@ final class AppModel: ObservableObject {
     }
 
     @Published var phase: Phase = .loading {
-        // The Taptic Engine is loud enough for the microphone to record.
-        didSet { proximity.isPaused = phase == .listening }
+        didSet {
+            // The Taptic Engine is loud enough for the microphone to record.
+            proximity.isPaused = phase == .listening
+            // Something that waited for an answer to finish can be said now.
+            if phase == .idle, notice != nil { Task { @MainActor in self.sayNoticeIfFree() } }
+        }
     }
     @Published var detections: [Detection] = []
     /// Shaded segmentation masks of the drawn detections, one small image covering the frame.
@@ -80,11 +92,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var onboarding = AppModel.launchesWithOnboarding
     private static var launchesWithOnboarding: Bool {
         let defaults = UserDefaults.standard
-        if defaults.string(forKey: "ask") != nil { return false }
+        if ["ask", "watch", "find"].contains(where: { defaults.string(forKey: $0) != nil }) { return false }
         return defaults.object(forKey: "onboarding") == nil || defaults.bool(forKey: "onboarding")
     }
     @Published var memoryPeople: [Person] = []
     @Published var memoryBelongings: [Belonging] = []
+    /// What is being looked for ("Dana", "your water bottle", "a chair") while a search is on.
+    @Published private(set) var searchingFor: String?
 
     let camera = CameraController()
     private let vlm = VLMService()
@@ -138,6 +152,55 @@ final class AppModel: ObservableObject {
     private static let sharperFramesPerTurn = 2
     private var started = false
 
+    // Video: the last half minute kept for questions about the recent past, and searching.
+    private let keyframes = KeyframeBuffer()
+
+    /// A search under way: the app is looking for one thing, beeping as it goes, until it finds
+    /// it, the user presses, or `searchSeconds` have passed.
+    private struct Search {
+        let target: SearchTarget
+        /// When it began (`systemUptime`).
+        let began: TimeInterval
+        /// The words that started it, for the debug capture.
+        let heard: String
+        /// Decides when the language model's answers add up to "found" (other targets: nil).
+        var monitor: WatchMonitor?
+        /// Decides when memory's sightings add up to "found".
+        var judge = SightingJudge()
+        /// True while memory is looking at a frame for a belonging.
+        var looking = false
+        var lastLook: TimeInterval = 0
+        /// How many frames were looked at.
+        var looks = 0
+        /// What each look gave, with seconds since the search began; kept for the debug capture.
+        var notes: [String] = []
+    }
+    private var search: Search?
+    /// Counts searches, so the answer to a look begun under one is never credited to the next.
+    private var searchNumber = 0
+    /// Beeps while a search is on, and ends it when its time is up.
+    private var ticker: Task<Void, Never>?
+    /// A search gives up after this long.
+    static let searchSeconds: TimeInterval = 30
+    /// Seconds between looks for a belonging; each is a handful of small model runs.
+    private static let belongingLookEvery: TimeInterval = 0.3
+    private lazy var cue = AlertCue()
+    /// Something the app says unasked: that a search has found its target, or has ended without.
+    private struct Notice {
+        let line: String
+        /// The sound and tap played first; nil for a notice that is only spoken.
+        var sound: AlertCue.Sound?
+    }
+    /// Waiting to be said once nothing else is being said or listened to. One at most: a newer
+    /// one replaces it, so notices never pile up.
+    private var notice: Notice?
+    /// Being said now; a press that cuts it off puts it back in `notice`.
+    private var noticeSpeaking: Notice?
+    private var observers: [NSObjectProtocol] = []
+    /// `-videoDebug YES`: for test sessions only. Without it nothing about what the video features
+    /// saw goes to the console log or the debug capture: no frames, replies or scores.
+    private let videoDebug = UserDefaults.standard.bool(forKey: "videoDebug")
+
     func start() {
         guard !started else { return }
         started = true
@@ -158,11 +221,23 @@ final class AppModel: ObservableObject {
         let memory = MemoryEngine(store: .onDevice())
         self.memory = memory
         let latestSnapshot = latestSnapshot
+        let keyframes = keyframes
         // Runs on the camera's video queue.
         camera.onFrame = { @Sendable [weak self] buffer, depth in
             // Obstacle warnings run on every frame, independent of how often the detector does.
             proximity.update(depth)
             guard pacer.shouldDetect() else { return }
+            // How much the view has changed decides which frames are kept for "what just
+            // happened?"; it costs well under a millisecond.
+            let signature = SceneSignature(buffer)
+            let heat = Heat(ProcessInfo.processInfo.thermalState)
+            if let signature {
+                keyframes.offer(at: ProcessInfo.processInfo.systemUptime, signature: signature, heat: heat) {
+                    RGBImage(pixelBuffer: buffer, maxSide: KeyframeBuffer.side)
+                } readable: {
+                    RGBImage(pixelBuffer: buffer, maxSide: KeyframeBuffer.readingSide)
+                }
+            }
             var found = detector?.detect(in: buffer) ?? []
             var center: Float?
             var depthInfo = "no depth"
@@ -197,6 +272,7 @@ final class AppModel: ObservableObject {
                 self.detectorMs = ms
                 if self.frameSize != size { self.frameSize = size }
                 if !self.cameraReady { self.cameraReady = true }
+                if let signature { self.searchTick(signature, heat: heat) }
             }
         }
         camera.onConfigured = { summary in print("[eyes] \(summary)") }
@@ -209,7 +285,26 @@ final class AppModel: ObservableObject {
         }
         speaker.onFinished = { [weak self] in
             guard let self, self.phase == .speaking else { return }
+            self.noticeSpeaking = nil
             self.phase = .idle
+        }
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.leftTheScreen() }
+        })
+        observers.append(center.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.heatChanged() }
+        })
+        if videoDebug {
+            // For the ten-minute test: whether memory holds level and how hot the phone runs.
+            Task { [weak self] in
+                while let self {
+                    try? await Task.sleep(for: .seconds(30))
+                    let thermal = ["nominal", "fair", "serious", "critical"][min(ProcessInfo.processInfo.thermalState.rawValue, 3)]
+                    print(String(format: "[eyes] video: memory %.0f MB, thermal %@, %d frames kept, %d search looks", memoryFootprintMB(), thermal,
+                                 self.keyframes.count, self.search?.looks ?? 0))
+                }
+            }
         }
 
         Task {
@@ -225,6 +320,16 @@ final class AppModel: ObservableObject {
                 // VoiceOver users get this from the status announcement instead.
                 if !onboarding, !UIAccessibility.isVoiceOverRunning { speaker.say("Ready.") }
                 listenForIntents()
+                // `-find "a chair"` and `-watch "someone sits in the chair"` start a search without
+                // anyone saying so, for tests.
+                let people = memory.store.people.map(\.name), things = memory.store.belongings.map(\.name)
+                if let said = UserDefaults.standard.string(forKey: "find"), let target = SearchTarget.named(said, people: people, belongings: things) {
+                    startSearch(target, heard: "-find \(said)")
+                    say(target.starting, source: "search")
+                } else if let said = UserDefaults.standard.string(forKey: "watch"), let target = SearchTarget.when(said, people: people, belongings: things) {
+                    startSearch(target, heard: "-watch \(said)")
+                    say(target.starting, source: "search")
+                }
                 await runLaunchQuestionIfAny()
             } catch {
                 phase = .failed("\(error)")
@@ -246,6 +351,12 @@ final class AppModel: ObservableObject {
     func pressDown() {
         guard !onboarding, phase != .loading, phase != .listening else { return }
         if case .failed = phase { return }
+        // Any press ends a search, and is spent on that: the beeping stops and nothing is asked.
+        // (Its release finds the app not listening, and does nothing.)
+        if search != nil {
+            endSearch(.stopped)
+            return
+        }
         pressStarted = Date()
         beginTurn()
         turnTrigger = "press"
@@ -320,6 +431,14 @@ final class AppModel: ObservableObject {
                         // A toggle has no release to time; make sure it is not mistaken for a tap.
                         pressStarted = .distantPast
                     }
+                case .find(let said):
+                    // Not in the middle of a question: the search would start under its answer.
+                    guard phase == .idle || phase == .speaking, let store = memory?.store,
+                          let target = SearchTarget.named(said, people: store.people.map(\.name), belongings: store.belongings.map(\.name))
+                    else { break }
+                    question = ""
+                    startSearch(target, heard: "intent: find \(said)")
+                    say(target.starting, source: "search")
                 }
             }
         }
@@ -329,6 +448,12 @@ final class AppModel: ObservableObject {
     /// processed by the time the question has been spoken.
     private func beginTurn() {
         turn += 1
+        // A press beats anything the app was saying unasked; that is said again after the answer.
+        if let cut = noticeSpeaking {
+            noticeSpeaking = nil
+            // Only a find is worth saying twice; "Stopped looking." is not.
+            if notice == nil, cut.sound == .found { notice = cut }
+        }
         speaker.stop()
         vlm.cancel()
         question = ""
@@ -405,6 +530,14 @@ final class AppModel: ObservableObject {
             say(Surroundings.safetyReply(for: allDetections), source: "detector")
             return
         }
+        // "What did that sign say?": the sign may be behind the user by now. The text recogniser
+        // reads the view as it is and then the frames kept from the last half minute, newest first.
+        if Recall.asksForPastText(heard), let text = await readFromRecentFrames() {
+            guard turn == self.turn else { return }
+            turnRoute = "recall"
+            say(text, source: "recall")
+            return
+        }
         // "Read this" and "what is the number?": exact text comes from the text recogniser, which
         // gets digits and fine print right where the model does not. It reads what the camera sees
         // now, as the question ends and the thing is being held up; at the start of the press it is
@@ -430,6 +563,11 @@ final class AppModel: ObservableObject {
                 say(reply, source: "memory")
                 return
             }
+        }
+        // "Did someone just walk by?": about the last half minute, which the frame from the
+        // start of the press does not show. Answered from the frames kept in memory.
+        if Recall.isAboutThePast(heard), !Recall.asksForPastText(heard), await answerFromRecentFrames(heard, turn: turn) {
+            return
         }
         if heard == Self.quickQuestion || SceneDescription.isOverviewQuestion(heard) {
             // Only a tap leaves it open what is being asked about. Someone who says "what do you
@@ -552,7 +690,8 @@ final class AppModel: ObservableObject {
             guard turn == self.turn else { return }
             llmInfo = String(format: "image %d tok %.0f ms · first token %.0f ms · %.0f tok/s",
                              stats.imageTokens, stats.imageMs, stats.ttftMs, stats.tokensPerSecond)
-            log("A: \(reply)\n   \(llmInfo)")
+            // What was in the kept frames stays out of the log, as the frames themselves do.
+            log(turnRoute == "recall" && !videoDebug ? "A: (from recent frames)\n   \(llmInfo)" : "A: \(reply)\n   \(llmInfo)")
             if !preface.isEmpty { reply = "\(preface) \(reply)" }
             answer = reply
             record(reply)
@@ -585,7 +724,8 @@ final class AppModel: ObservableObject {
         vlm.cancel()
         answer = reply
         llmInfo = "answered from \(source)"
-        log("A (\(source)): \(reply)")
+        // What was read off the kept frames stays out of the log, as the frames themselves do.
+        log(source == "recall" && !videoDebug ? "A (\(source))" : "A (\(source)): \(reply)")
         turnRoute = source
         record(reply)
         phase = .speaking
@@ -644,6 +784,25 @@ final class AppModel: ObservableObject {
             return "Memories."
         case .cancelled:
             return "Okay, nothing changed."
+        case .watch(let said):
+            guard let target = SearchTarget.when(said, people: store.people.map(\.name), belongings: store.belongings.map(\.name)) else { return "Watch for what?" }
+            releaseModel()
+            startSearch(target, heard: heard)
+            // The target is said back: a misheard one is caught now, not by half a minute of beeps.
+            return target.starting
+        case .lookFor(let said):
+            guard let target = SearchTarget.named(said, people: store.people.map(\.name), belongings: store.belongings.map(\.name)) else { return "Look for what?" }
+            releaseModel()
+            startSearch(target, heard: heard)
+            return target.starting
+        case .stopWatching:
+            // The press that carried these words has already ended any search (see `pressDown`).
+            return "Not looking for anything."
+        case .watchStatus:
+            return search.map { "Looking for \($0.target.name)." } ?? "Not looking for anything."
+        case .forgetRecent:
+            keyframes.clear()
+            return "Forgotten."
         case .tellTime:
             return Date().formatted(date: .omitted, time: .shortened) + "."
         case .tellDate:
@@ -671,6 +830,7 @@ final class AppModel: ObservableObject {
             print("[eyes] faces in view: \(detail.isEmpty ? "none" : detail)")
         }
         faces = now
+        searchSaw(faces: now)
     }
 
     private func noticed(belongings now: [FoundBelonging]) {
@@ -705,7 +865,8 @@ final class AppModel: ObservableObject {
         guard !question.isEmpty, !answer.isEmpty else { return }
         history.insert(Exchange(question: question, answer: answer), at: 0)
         if history.count > 30 { history.removeLast() }
-        saveForDebugging(reply: answer)
+        // A reply drawn from the kept frames is derived from them, and nothing of those is written down.
+        if turnRoute != "recall" || videoDebug { saveForDebugging(reply: answer) }
     }
 
     /// Hands the finished turn to the debug capture: the frame it was about and everything measured.
@@ -753,6 +914,303 @@ final class AppModel: ObservableObject {
         }
         if let frame = turnFrame { return await memory.whoIsHere(frame: frame, depth: nil) }
         return []
+    }
+
+    // MARK: Video: the recent past
+
+    /// Answers a question about the last half minute from the frames kept in memory, with the
+    /// view as it is now as the last of them. False when nothing has been kept (the app has just
+    /// come back, or the user cleared it): the question then goes the usual way.
+    private func answerFromRecentFrames(_ heard: String, turn: Int) async -> Bool {
+        guard let frame = camera.latestFrame, let current = RGBImage(pixelBuffer: frame, maxSide: KeyframeBuffer.side) else { return false }
+        let clip = keyframes.clip(at: ProcessInfo.processInfo.systemUptime, current: current)
+        guard clip.count > 1 else { return false }
+        // The frame read at the start of the press is not what this is about.
+        vlm.cancel()
+        let vlm = vlm
+        ingestTask = Task { try await vlm.ingest(clip: clip) }
+        turnRoute = "recall"
+        log("answering from \(clip.count) frames of the last \(Int(clip.last?.seconds ?? 0)) s")
+        // The style of the answer follows the question as it was asked, not as it is put to the model.
+        await answerWithModel(Recall.forTheModel(heard), as: AnswerStyle.kind(of: heard), turn: turn)
+        return true
+    }
+
+    /// The text in the newest frame that has any: the view now, then the kept frames.
+    private func readFromRecentFrames() async -> String? {
+        var frames: [CVPixelBuffer] = []
+        if let now = camera.latestFrame { frames.append(now) }
+        frames += keyframes.readableFrames().compactMap { $0.pixelBuffer() }
+        for frame in frames {
+            if let text = await Self.readText(in: frame, .everything) { return text }
+        }
+        return nil
+    }
+
+    // MARK: Searching
+
+    /// Begins looking for `target`. From here until it is found, the user presses, or
+    /// `searchSeconds` pass, the app beeps once a second and looks at the camera's view as fast as
+    /// the judge for this kind of target allows.
+    private func startSearch(_ target: SearchTarget, heard: String) {
+        stopSearching()
+        var search = Search(target: target, began: ProcessInfo.processInfo.systemUptime, heard: heard)
+        if case .sight(let condition, _) = target {
+            var monitor = WatchMonitor(condition)
+            monitor.policy = .searching(forModel: vlm.modelFile ?? "")
+            search.monitor = monitor
+        }
+        self.search = search
+        searchingFor = target.name
+        notice = nil
+        cue.prepare()
+        print("[eyes] search \(searchNumber) started: \(Self.kind(of: target))\(videoDebug ? " \"\(target.name)\"" : "")")
+        // Someone already in view is found by the next report from face memory, a third of a
+        // second away. The list in hand is not used: it dates from before the press, when the
+        // phone may have been pointing somewhere else.
+        let number = searchNumber
+        ticker = Task { [weak self] in
+            while true {
+                try? await Task.sleep(for: .seconds(AlertCue.tickEvery))
+                guard let self, !Task.isCancelled, number == self.searchNumber, let search = self.search else { return }
+                if ProcessInfo.processInfo.systemUptime - search.began >= Self.searchSeconds {
+                    self.endSearch(.timedOut)
+                    return
+                }
+                // Silent under speech, so the first beep follows "Looking for …".
+                if self.phase == .idle, !self.onboarding { self.cue.play(.tick) }
+            }
+        }
+    }
+
+    private static func kind(of target: SearchTarget) -> String {
+        switch target {
+        case .person: "a person, by face memory"
+        case .belonging: "a belonging, by belonging memory"
+        case .sight: "by the language model"
+        }
+    }
+
+    /// Drops the search without a word. Anything still looking on its behalf finds the count moved on.
+    private func stopSearching() {
+        searchNumber += 1
+        ticker?.cancel()
+        ticker = nil
+        search = nil
+        searchingFor = nil
+    }
+
+    private enum SearchEnd {
+        /// `line` is what is said; `frame` is the picture that settled it.
+        case found(line: String, frame: CVPixelBuffer?)
+        case timedOut
+        /// The user pressed.
+        case stopped
+        case tooHot
+        case leftTheScreen
+    }
+
+    /// Ends the search and tells the user how it ended: the chime and where the thing is, or the
+    /// falling notes and that it was not found.
+    private func endSearch(_ end: SearchEnd) {
+        guard let search else { return }
+        let seconds = ProcessInfo.processInfo.systemUptime - search.began
+        var said: Notice?
+        var outcome: String
+        var frame: CVPixelBuffer?
+        switch end {
+        case .found(let line, let seen):
+            outcome = "found"
+            frame = seen
+            said = Notice(line: line, sound: .found)
+        case .timedOut:
+            outcome = "not found"
+            var line = search.target.notFound
+            // For one of the user's things, where it was last seen is the next best answer.
+            if case .belonging(let name) = search.target, let thing = memory?.store.belonging(named: name), thing.lastSeen != nil {
+                line = MemoryReplies.whereIs(thing, found: nil)
+            }
+            said = Notice(line: line, sound: .gaveUp)
+        case .stopped:
+            outcome = "stopped by a press"
+            said = Notice(line: "Stopped looking.")
+        case .tooHot:
+            outcome = "stopped, phone too hot"
+            said = Notice(line: "Stopped looking. Phone too hot.", sound: .gaveUp)
+        case .leftTheScreen:
+            outcome = "stopped, app left the screen"
+        }
+        outcome += String(format: " after %.1f s, %d looks", seconds, search.looks)
+        print("[eyes] search \(searchNumber) ended: \(outcome)")
+        saveForDebugging(search, outcome: outcome, reply: said?.line ?? "", frame: frame ?? camera.latestFrame)
+        stopSearching()
+        guard let said else { return }
+        // The end of a search is not kept waiting behind the app's own "Looking for …".
+        if phase == .speaking {
+            speaker.stop()
+            noticeSpeaking = nil
+            phase = .idle
+        }
+        notice = said
+        sayNoticeIfFree()
+    }
+
+    /// Called for every analysed frame while the app is on screen: the search takes its next look
+    /// if it is due one. People are not looked for here: `searchSaw(faces:)` hears of everyone
+    /// face memory recognises, a few times a second.
+    private func searchTick(_ signature: SceneSignature, heat: Heat) {
+        guard let search, !onboarding else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - search.began < Self.searchSeconds else {
+            endSearch(.timedOut)
+            return
+        }
+        guard phase == .idle || phase == .speaking else { return }
+        switch search.target {
+        case .person:
+            break
+        case .belonging(let name):
+            lookForBelonging(named: name, at: now)
+        case .sight:
+            askModel(signature, heat: heat, at: now)
+        }
+    }
+
+    /// Face memory has reported who is in view. A search for one of them ends on a sure match;
+    /// an unsure one is left to `FaceTracker`, which makes three in a row sure.
+    private func searchSaw(faces: [RecognizedFace]) {
+        guard var search, case .person(let name) = search.target, !onboarding else { return }
+        let wanted = MemoryStore.key(name)
+        let seen = faces.first { $0.name.map(MemoryStore.key) == wanted }
+        guard let seen else { return }
+        search.looks += 1
+        search.notes.append(String(format: "%.1fs %@ %.2f%@", ProcessInfo.processInfo.systemUptime - search.began, name, seen.score ?? 0, seen.tentative ? " (unsure)" : ""))
+        self.search = search
+        guard !seen.tentative else { return }
+        endSearch(.found(line: MemoryReplies.whereIs(name, among: [seen]), frame: latestSnapshot.value?.frame))
+    }
+
+    /// Has belonging memory look at the newest frame for the one thing being searched for. The
+    /// looks run one at a time, a third of a second apart; each embeds a few regions of the frame.
+    private func lookForBelonging(named name: String, at now: TimeInterval) {
+        guard var search, !search.looking, now - search.lastLook >= Self.belongingLookEvery,
+              let memory, let thing = memory.store.belonging(named: name), let shot = latestSnapshot.value
+        else { return }
+        search.looking = true
+        search.lastLook = now
+        search.looks += 1
+        self.search = search
+        let number = searchNumber
+        Task {
+            let found = await memory.find(thing, in: [shot], logging: false)
+            guard number == self.searchNumber, var search = self.search else { return }
+            search.looking = false
+            if let found {
+                search.notes.append(String(format: "%.1fs %@ %.2f%@", ProcessInfo.processInfo.systemUptime - search.began, name, found.score, found.tentative ? " (unsure)" : ""))
+            }
+            let verdict = search.judge.saw(sure: found.map { !$0.tentative } ?? false, unsure: found?.tentative ?? false)
+            self.search = search
+            guard let found, verdict != .nothing else { return }
+            self.belongingsInView = [found]
+            // "Your water bottle is 2 feet to your left." or, never sure, "That might be your …".
+            self.endSearch(.found(line: MemoryReplies.whereIs(thing, found: found), frame: shot.frame))
+        }
+    }
+
+    /// Asks the language model about the newest frame when the monitor wants it to. The search
+    /// never has the model while the user does: a press ends the search before it begins a turn.
+    private func askModel(_ signature: SceneSignature, heat: Heat, at now: TimeInterval) {
+        guard var search, var monitor = search.monitor, !pacer.modelBusy, !pacer.watchChecking else { return }
+        guard monitor.wantsCheck(at: now, signature: signature, heat: heat),
+              let frame = camera.latestFrame, let image = copiedImage(of: frame)
+        else { return }
+        monitor.began(at: now, signature: signature)
+        search.monitor = monitor
+        search.looks += 1
+        self.search = search
+        pacer.watchChecking = true
+        let number = searchNumber, question = monitor.condition.question(), vlm = vlm, pacer = pacer
+        Task {
+            let began = Date()
+            // nil when a press got in first, an error when one cut it short: either way, no answer.
+            let probability = try? await vlm.check(image, question: question) { pacer.modelBusy }
+            pacer.watchChecking = false
+            guard number == self.searchNumber, var search = self.search, var monitor = search.monitor else { return }
+            guard let probability else {
+                monitor.abandoned()
+                search.monitor = monitor
+                self.search = search
+                return
+            }
+            search.notes.append(String(format: "%.1fs model %.3f in %.0f ms", ProcessInfo.processInfo.systemUptime - search.began, probability,
+                                       Date().timeIntervalSince(began) * 1000))
+            if self.videoDebug { print("[eyes] search look \(search.looks): \(search.notes.last ?? "")") }
+            let verdict = monitor.answered(probability)
+            search.monitor = monitor
+            self.search = search
+            if verdict != .nothing { self.endSearch(.found(line: search.target.found, frame: frame)) }
+        }
+    }
+
+    /// Says what is waiting to be said, if the user is neither speaking nor being answered. The
+    /// end of a search is a sound and a tap first, then the words, so that it cannot be taken for
+    /// part of an answer; nothing is ever said over anything else.
+    private func sayNoticeIfFree() {
+        guard phase == .idle, !onboarding, let next = notice else { return }
+        notice = nil
+        noticeSpeaking = next
+        question = ""
+        answer = next.line
+        llmInfo = "search"
+        phase = .speaking
+        guard let sound = next.sound else {
+            speaker.say(next.line)
+            return
+        }
+        cue.play(sound)
+        Task {
+            try? await Task.sleep(for: .seconds(sound.seconds))
+            // A press in the meantime has taken the notice back, to be said after its answer.
+            guard self.noticeSpeaking?.line == next.line, self.phase == .speaking else { return }
+            self.speaker.say(next.line)
+        }
+    }
+
+    /// The app has left the screen. The kept frames go: they are for the moment, not for later.
+    /// So does a search: it would beep on from a pocket with nothing to look at.
+    private func leftTheScreen() {
+        keyframes.clear()
+        print("[eyes] recent frames cleared")
+        endSearch(.leftTheScreen)
+    }
+
+    /// At thermal state "critical" a search stops, and says so; below that the looks only come
+    /// further apart (`WatchMonitor.Policy.hotGap`).
+    private func heatChanged() {
+        guard search != nil, ProcessInfo.processInfo.thermalState == .critical else { return }
+        endSearch(.tooHot)
+    }
+
+    /// Hands a finished search to the debug capture as a turn of its own: the frame it ended on
+    /// and what each look gave. Searches are short and begun by the user, so this is kept like any
+    /// other turn (and, like them, not at all under `-debugCapture NO`).
+    private func saveForDebugging(_ search: Search, outcome: String, reply: String, frame: CVPixelBuffer?) {
+        guard DebugCapture.shared.isEnabled else { return }
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let record = TurnRecord(
+            id: stamp.string(from: Date()), date: Date(), trigger: "search", pressSeconds: ProcessInfo.processInfo.systemUptime - search.began,
+            heard: search.heard, route: "search", reply: reply, model: "\(Self.kind(of: search.target)): \(outcome)",
+            thermal: ["nominal", "fair", "serious", "critical"][min(ProcessInfo.processInfo.thermalState.rawValue, 3)],
+            centerDistance: centerDistance,
+            detections: allDetections.map { .init($0.label, $0.box, confidence: $0.confidence, distance: $0.distance) },
+            faces: faces.map { face in
+                .init(face.name ?? "unknown", face.box, confidence: face.score, distance: face.distance, note: face.tentative ? "tentative" : nil)
+            },
+            belongings: belongingsInView.map { .init($0.name, $0.box, confidence: $0.score, distance: $0.distance, note: $0.tentative ? "tentative" : nil) },
+            knownPeople: memory?.store.people.map(\.name) ?? [], knownThings: memory?.store.belongings.map(\.name) ?? [],
+            notes: search.notes)
+        DebugCapture.shared.save(record, frame: frame, depth: latestDepth, audio: nil)
     }
 
     // MARK: Debugging

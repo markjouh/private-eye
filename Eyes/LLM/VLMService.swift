@@ -54,6 +54,34 @@ final class VLMService: @unchecked Sendable {
         }
     }
 
+    /// Which model file is loaded (see `LLMEngine.modelFile`); nil until it has loaded.
+    var modelFile: String? { engine?.modelFile }
+
+    /// Starts a turn about the last half minute instead of one image (see `LLMEngine.ingest(frames:)`).
+    func ingest(clip frames: [VideoFrame]) async throws {
+        try await run {
+            guard let engine = self.engine else { throw LLMError("model not loaded") }
+            try engine.ingest(frames: frames)
+        }
+    }
+
+    /// How sure the model is that the answer to a yes/no `question` about `image` is yes, for watch
+    /// mode. This uses the model's one context, so it must never run inside a turn the user began:
+    /// `turnActive` is asked on the model's own queue, before and after the image goes in, and the
+    /// result is nil when a turn was under way. A press also cancels a check already running.
+    func check(_ image: CGImage, question: String, unless turnActive: @escaping @Sendable () -> Bool) async throws -> Float? {
+        try await run {
+            guard let engine = self.engine else { throw LLMError("model not loaded") }
+            if turnActive() { return nil }
+            guard let rgb = RGBImage(cgImage: image, maxSide: Self.imageMaxSide) else {
+                throw LLMError("could not convert camera frame")
+            }
+            try engine.ingest(image: rgb)
+            if turnActive() { return nil }
+            return try engine.yesProbability(question: question)
+        }
+    }
+
     /// `suffix` replaces the engine's usual style instruction for this one answer (e.g. to ask for a
     /// bare list); `maxTokens` caps its length.
     func answer(_ question: String, as kind: AnswerStyle.Kind? = nil, suffix: String? = nil, maxTokens: Int? = nil,

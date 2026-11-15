@@ -142,6 +142,7 @@ struct ContentView: View {
             Text(String(format: "%@ · detector %.0f ms · %d objects", statusText, model.detectorMs, model.detections.count)
                  + (model.centerDistance.map { " · ahead \(Surroundings.tag($0))" } ?? ""))
             if !model.llmInfo.isEmpty { Text(model.llmInfo) }
+            if let wanted = model.searchingFor { Text("looking for: \(wanted)") }
         }
         .font(.caption.weight(.medium).monospaced())
         .foregroundStyle(.white)
@@ -163,6 +164,7 @@ struct ContentView: View {
         var parts = [statusText, String(format: "detector %.0f milliseconds", model.detectorMs), "\(model.detections.count) objects"]
         if let ahead = model.centerDistance { parts.append("\(Surroundings.spoken(ahead)) ahead") }
         if !model.llmInfo.isEmpty { parts.append(model.llmInfo) }
+        if let wanted = model.searchingFor { parts.append("looking for: \(wanted)") }
         return parts.joined(separator: ", ")
     }
 
@@ -225,7 +227,7 @@ struct ContentView: View {
                 // Keeps its place when hidden, so the button does not change height with its state.
                 Text("Tap anywhere · hold to ask")
                     .font(.subheadline.weight(.medium))
-                    .opacity(describes ? 1 : 0)
+                    .opacity(describes && model.searchingFor == nil ? 1 : 0)
             }
         }
         .multilineTextAlignment(.center)
@@ -309,7 +311,7 @@ struct ContentView: View {
         case .listening: "Listening…"
         case .thinking: "Thinking…"
         case .failed: "Model failed to load"
-        case .idle, .speaking: "Describe"
+        case .idle, .speaking: model.searchingFor == nil ? "Describe" : "Looking… tap to stop"
         }
     }
 
@@ -317,6 +319,7 @@ struct ContentView: View {
         switch model.phase {
         case .loading, .failed: ""
         case .listening: "Stops listening and answers."
+        case .idle, .speaking where model.searchingFor != nil: "Stops looking."
         case .idle, .thinking, .speaking:
             "Describes what is ahead. To ask a question, double-tap and hold while you speak, or use Magic Tap."
         }
@@ -328,7 +331,7 @@ struct ContentView: View {
         case .thinking: "ellipsis"
         case .loading: "hourglass"
         case .failed: "exclamationmark.triangle"
-        case .idle, .speaking: "mic.fill"
+        case .idle, .speaking: model.searchingFor == nil ? "mic.fill" : "binoculars.fill"
         }
     }
 

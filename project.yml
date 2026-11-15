@@ -31,6 +31,7 @@ targets:
     dependencies:
       - framework: Vendor/llama.xcframework
         embed: true
+      - target: EyesControls
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(EYES_BUNDLE_ID)
@@ -53,6 +54,31 @@ targets:
         # sheets dark for users in Light Mode.
         INFOPLIST_KEY_UIUserInterfaceStyle: Dark
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+  # Lock Screen, Control Center and Action button controls. They only open the app and run one of
+  # its intents there, so the intents file is all this shares with it.
+  EyesControls:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: EyesControls
+      - path: Eyes/Intents/EyesIntents.swift
+    info:
+      path: EyesControls/Info.plist
+      properties:
+        CFBundleDisplayName: Private Eye
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(EYES_BUNDLE_ID).controls
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTED_PLATFORMS: iphoneos
+        SKIP_INSTALL: YES
   EyesCLI:
     type: tool
     platform: macOS
@@ -60,6 +86,7 @@ targets:
       - path: EyesCLI
       # Everything below is shared with the app, so it must also compile for macOS.
       - path: Eyes/LLM
+      - path: Eyes/Video
       - path: Eyes/Vision
         excludes: ["CameraController.swift"]
       - path: Eyes/Memory

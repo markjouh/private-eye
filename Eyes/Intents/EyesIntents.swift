@@ -1,6 +1,11 @@
 import AppIntents
 
-/// Carries a request from an App Intent (Action button, Shortcuts, Siri) to the running app.
+/// Carries a request from an App Intent (Action button, Lock Screen control, Shortcuts, Siri) to the
+/// running app.
+///
+/// This file is compiled into the app and into the controls extension (`EyesControls`): a control
+/// names the intent it runs, so the extension has to know the type, but the intents ask for the
+/// foreground and so always run here, in the app.
 ///
 /// An intent can run before the app can act on it: it may be what launched the app, with the model
 /// still loading. So requests go through a stream that holds the latest one until `AppModel` starts
@@ -11,6 +16,8 @@ enum IntentTrigger {
         case describe
         /// Start listening for a question, or stop and answer if already listening.
         case toggleListening
+        /// Start a search for the thing named: "Dana", "my water bottle", "a chair".
+        case find(String)
     }
 
     private static let pipe = AsyncStream<Request>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -51,19 +58,26 @@ struct AskQuestionIntent: AppIntent {
     }
 }
 
-/// Publishes the intents as ready-made shortcuts, so they show up in the Shortcuts app, in Siri and
-/// in the Action button's shortcut picker without the user building anything.
-struct EyesShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: DescribeAheadIntent(),
-            phrases: ["Describe what's ahead with \(.applicationName)", "Ask \(.applicationName) what's ahead"],
-            shortTitle: "Describe What's Ahead",
-            systemImageName: "eye")
-        AppShortcut(
-            intent: AskQuestionIntent(),
-            phrases: ["Ask \(.applicationName) a question"],
-            shortTitle: "Ask a Question",
-            systemImageName: "mic")
+/// Starts a search: the app looks for the thing for up to half a minute, beeping, and says where it
+/// is when it finds it. Run with nothing filled in (from the Action button, say), it asks what to
+/// look for and takes the answer by voice.
+struct FindIntent: AppIntent {
+    static let title: LocalizedStringResource = "Find Something"
+    static let description = IntentDescription("Opens Private Eye and looks for a person or thing you name, beeping until it finds it or half a minute has passed.")
+    static let supportedModes: IntentModes = .foreground
+
+    @Parameter(title: "What to look for", requestValueDialog: "What should I look for?")
+    var target: String
+
+    init() {}
+
+    /// For a control, which is given its target when it is set up.
+    init(target: String) {
+        self.target = target
+    }
+
+    func perform() async throws -> some IntentResult {
+        IntentTrigger.send(.find(target))
+        return .result()
     }
 }

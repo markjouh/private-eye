@@ -26,11 +26,33 @@ called `Eyes`.)
   Teaching a thing again adds views of it, which is what makes an unsure match a sure one.
 - **Crossing questions** ("is it safe to cross?") never reach the model: the reply lists the vehicles
   and signals detected and declines to judge.
-- **Action button**: Settings > Action Button > Shortcut > Private Eye > "Describe What's Ahead".
+- **Action button**: Settings > Action Button > Shortcut > Private Eye, then one of "Describe What's
+  Ahead", "Ask a Question" (press again to stop and hear the answer) or "Find Something" (it asks
+  what to look for, takes the answer by voice, and starts a search). The same three are in the
+  Shortcuts app and answer to Siri.
+- **Lock Screen and Control Center**: the same three as controls. Touch and hold the Lock Screen,
+  Customize, tap one of the two round buttons at the bottom (where the torch and camera are), and
+  pick one under Private Eye. "Find Something" is given its target when it is added ("my keys").
+  From a locked phone the app opens after Face ID. Added 2026-11-15 and not yet pressed on a phone.
 - **Introduction**: every launch opens with the logo, four short notes and the voice settings
   (speaking speed and a choice of up to three voices). It is shown every time because the app is
   being presented; nothing stored is touched. `-onboarding NO` on the launch command skips it, as
-  does `-ask`. The same settings are under Memories > Settings.
+  do `-ask`, `-find` and `-watch`. The same settings are under Memories > Settings.
+- **The last half minute**: "Did someone just walk by?", "What just happened?", "Was there a dog?"
+  are answered from a handful of small frames kept in memory, a new one whenever the view changes.
+  "What did that sign say?" is read off them by the text recogniser. The frames are never written
+  to disk, and are dropped when the app leaves the screen or on "forget what you just saw".
+- **Search**: "Find my water bottle", "Look for Dana", "Watch for a chair", "I can't find my
+  keys", "Can you help me find the exit?", "Tell me when someone sits in the chair": any way of
+  saying "go and look for this" (`Commands.seekingForms` has the list). "Where is my water bottle?"
+  and "Do you see Dana?" are still answered at once, from the view as it is. The app says the
+  target back ("Looking for Dana."),
+  then beeps softly once a second while it looks at whatever the camera is swept across. When it
+  finds the thing: a rising chime, a strong tap, and where it is ("Dana, 6 feet, left.", "Your
+  water bottle is 2 feet ahead.", "Found a chair."). It stops, with a word, on any press of the
+  screen, the Camera Control or a volume button, and gives up after 30 seconds with two falling
+  notes ("Didn't find Dana."). "What are you looking for?". First tried on the phone on
+  2026-11-15: see "Searching" below.
 - **Obstacle haptics** exist but are off by default ("haptics on" / "haptics off"); they need tuning
   on real walks.
 - On screen, for sighted helpers and demos: the camera with each detected object's shape shaded and
@@ -76,6 +98,12 @@ The project file is generated: edit `project.yml` and rerun `xcodegen generate` 
 | Mode | What it checks |
 |---|---|
 | `eyes-cli ask $M photo.jpg "Where is the kettle?"` | Model answers. `--batch pairs.tsv` runs a test set; `--system`, `--suffix`, `--side N`. |
+| `eyes-cli video $M clip.mov "Did someone just walk by?"` | Model answers about a short clip: several frames at once, in LFM3's video layout. `--keyframes` shows it the frames the app would have kept; `--batch clips.tsv` marks replies against expected ones; `--frames 8,16 --side 256,384` runs every combination and compares right answers, tokens and time; `--read` reads text off the kept frames instead; `--layout` prints the prompt built around the frames. |
+| `eyes-cli check $M --batch checks.tsv` | The yes/no check a model-judged search rests on: one frame, one condition, how sure the model is. Counts, for a range of bars, frames that pass and should not and frames that fail and should not; `--side`, `--template` to compare sizes and wordings. |
+| `eyes-cli watch $M --search clip.mov "there is a chair in view" none` | A model-judged search replayed on a clip with the app's own decisions and the real model: when it asked, what it was told, whether and when it said "found", against "none" or the second the thing appears. `--batch`, `--heat hot`, `--limit`. Without `--search` it replays the patient watch the app began with. |
+| `eyes-cli find $F $T $D turns/ --person "Dana=<turn id>" --thing "water bottle=<turn id>"` | A memory-judged search replayed on every turn saved from the phone: on which frames face memory or belonging memory would have said "found", next to what the phone itself recorded. `$F` and `$T` are the ArcFace and DINOv3 packages. |
+| `eyes-cli scene --clip clip.mov` | The scene-change score from frame to frame; `a.jpg b.jpg` and `--pairs` for stills. |
+| `eyes-cli soak $M clip.mov "condition" "question"` | Ten minutes of watching and of questions about the recent past, with the memory in use each minute. |
 | `eyes-cli describe $D $M photo.jpg ...` | The tap description end to end, including whether each photo is taken as one thing or a scene; `--suffix` tries another instruction. |
 | `eyes-cli detect $D --out dir photo.jpg` | Detector boxes and mask shading, written as PNGs. |
 | `eyes-cli safety "Can I cross now?"` | Which questions are routed away from the model, and every reply built by code: crossing, distance ahead, who is in view. |
@@ -130,13 +158,21 @@ Nutrition Label criteria, with the open failures and a manual test script for th
     Eyes/Memory/                    FaceEmbedder, FaceTracker, ThingEmbedder, BelongingTargeting, MemoryStore,
                                     MemoryEngine, Commands (voice commands), MemoryReplies, PixelWarp
     Eyes/Debug/                     DebugCapture: per-turn frames, audio and decisions for later inspection
+    Eyes/Video/                     SceneSignature (how much the view changed), KeyframeBuffer (the last half
+                                    minute, in memory), Recall (which questions are about it), SearchTarget
+                                    (what a search is for and who judges it), WatchCondition, WatchMonitor
+                                    (when to ask the model, when its answers mean "found"), FrameScaling
     Eyes/Speech/                    SpeechRecognizer (always-on mic, push to talk), Speaker (streamed TTS),
-                                    VoiceSettings (speed and voice, kept across launches)
+                                    VoiceSettings (speed and voice, kept across launches), AlertCue (the
+                                    beep, chime and taps of a search)
     Eyes/Haptics/                   ProximityModel (obstacle logic), ProximityHaptics (Taptic Engine)
-    Eyes/Intents/                   App Intents for the Action button, Shortcuts and Siri
+    Eyes/Intents/                   App Intents for the Action button, Shortcuts and Siri (EyesIntents is
+                                    shared with the controls extension; EyesShortcuts is the app's alone)
+    EyesControls/                   the extension holding the Lock Screen and Control Center controls
     Eyes/UI/                        preview, mask and face overlays, press surface, hardware buttons, main screen,
                                     OnboardingView, VoiceSettingsControls, MemoryView
-    tools/                          export_yoloe.py, export_embedders.py, make_icon.py, setup.sh
+    tools/                          export_yoloe.py, export_embedders.py, make_icon.py, setup.sh,
+                                    make_test_clip.py (test clips from stills, with a hand's wobble)
 
 ## Measured (on the Mac unless noted)
 
@@ -289,6 +325,160 @@ What each other part is for, and the evidence (one session on the phone: 92 turn
 - **Obstacle haptics** are off by default and untuned. They and the LiDAR capture are the parts
   with the least to show for themselves so far.
 
+## Video: the last half minute
+
+Everything here was measured on the Mac, on frames saved from the phone and on clips made from
+them (`tools/make_test_clip.py`: stills held with a hand's wobble, a person pasted in, cuts between
+stills). **Nothing has been run on the phone and no real video has been used**: the timings, the
+heat, ten minutes of use, and how real movement looks to it are all still to be tested.
+
+- **The language model never sees every frame.** Each frame the detector analyses is reduced to a
+  24 x 32 grid of brightness (`SceneSignature`), and two grids give a change score: 0 for the same
+  view, 2 to 3 for unrelated ones. Two frames of one scene held by hand four seconds apart scored
+  0.18; a wobbling hand scored 0.3 to 0.4, at most 0.66 in two minutes on four scenes; a person
+  appearing in an eighth of the view scored 1.3. A frame is kept from 0.8.
+- **The last half minute** is at most 15 frames, 384 pixels on the longer side, about 5 MB, plus
+  larger copies of the newest six for the text recogniser (14 MB). A question about the recent past
+  (`Recall`; 31 test sentences) gets them and the view at that moment, in the video layout LFM3-VL
+  was trained on: pairs of frames under a timestamp, each pair costing one frame's tokens (about
+  108), so the whole clip is under 1,000 tokens. The layout was checked token for token against
+  llama.cpp's own.
+- **Questions about the recent past**: on the first test clips (stills, no wobble), across nine
+  settings of frame count and size, "Did a person appear?" was right 35 times in 36. Through the
+  app's own choice of frames, 9 of 13: the three wrong yeses were on stills with part of someone at
+  the edge (a hand, a sleeve), and "Did someone just walk by?" got a no where the person pasted in
+  was sitting. More frames or pixels did not help. On the Mac the vision encoder is about 45% of
+  the time to read a clip; encoding frames as they are kept would save that, and is not built.
+- **Text that has left the view** (`eyes-cli video --read`): a restroom sign was read back from a
+  kept frame eight seconds after the camera turned away; an EXIT sign was not (the recogniser
+  finds nothing on that one live either).
+- **Ten minutes** (`eyes-cli soak`, a view that cuts between 61 scenes): 104 checks, 27 questions
+  and 212 frames through the 15-frame buffer. Memory, read each minute, stayed between 634 and
+  721 MB, no higher at the end than at the start.
+
+`-videoDebug YES` logs memory and thermal state every 30 s; without it nothing kept from the last
+half minute is logged or saved, and a reply drawn from the kept frames is left out of the debug
+capture.
+
+## Searching
+
+"Find …", "look for …", "watch for …", "help me find …" and "tell me when …" start a search: for
+up to 30 seconds the app looks for one thing in whatever the camera is pointed at, beeping once a
+second so the user knows it is still looking, and ends with a chime and a strong tap when it finds
+it. Any press ends it. The measurements below were made on the Mac, on frames and a console log
+saved from the phone (2026-11-14), before it had run there.
+
+**First session on the phone** (2026-11-15, Witness-2B, 12 searches in twelve minutes, from the
+debug capture): 11 found and one stopped by a press; none ran out of time. The frame each of the
+11 ended on shows the thing found. Found after 2.1 to 16.2 s, 4.9 s at the middle.
+- By the model, 9 searches (a camera, a laptop, a Lego brick, a sleep mask, a T-shirt with code on
+  it, a projector, a Canon camera twice, and "a blindfold"): 8 found, 5 of them on one very sure
+  yes and 3 on two running. "A blindfold" got 0.015 and 0.041 for the sleep mask on the table and
+  was stopped; asked for as "a sleep mask" it was found in 4.5 s at 0.987.
+- A look took 0.8 s (41 looks, 795 to 953 ms), as assumed, one starting about a second after the
+  last. In three searches run back to back the 11 looks took 1.9 to 3.4 s each, for a reason not
+  yet found (thermal state "fair" throughout).
+- By face memory, one person twice (0.50 after 2.1 s, 0.57 after 14.9 s). By belonging memory, the
+  jacket once, on two unsure matches running (0.62, 0.62): "That might be your jacket, 1 foot
+  ahead."
+- What it did not test: a search with nothing to find. The false finds measured on the Mac are
+  still the only figure for that.
+- Six times that evening the search was first asked for in words that did not start one ("Look
+  for" and a name, "Look for my jacket", "Look for a Canon camera", "Watch from my jacket"); those and
+  the other ways of saying it now all do.
+
+Who judges whether the thing is in view depends on what it is (`SearchTarget`), and each judge is
+used alone:
+
+| Target | Judge | Found when |
+|---|---|---|
+| Someone the user has introduced ("Dana") | Face memory (ArcFace), which already names faces in view about three times a second | It is sure of that name once. An unsure match is left to `FaceTracker`, which makes three in a row sure. |
+| One of the user's own things ("my water bottle") | Belonging memory (DINOv3), looking for that one thing about three times a second | One sure match (0.70 or more), or two unsure ones running (0.60 to 0.70), said as "That might be your …". |
+| Anything else ("a chair", "the exit", "someone sits in the chair") | The language model, asked yes or no about the newest frame, back to back (about one look a second on the phone) | One very sure yes (0.95 for Witness-2B), or two sure ones running (0.7). |
+
+What was measured:
+
+- **People, by face memory alone.** The phone's console log has 360 face reports from one
+  afternoon: the 245 it named scored 0.26 to 1.00 against the person named (88% of them 0.5 or more),
+  the 115 it left unnamed 0.33 at most (83% of them under 0.2). Replayed on the Mac (`eyes-cli
+  find`: four people each taught from one saved frame, then every face in all 310 saved frames
+  judged one frame at a time): of the 84 frames where the phone had named one of the four, the
+  replay was sure of the same name on 77 and unsure on 2; against the people the phone had not named
+  on a frame, two of the four never scored above 0.19. Three frames gave a sure name the phone had
+  not recorded (0.52, 0.67, 0.80); the phone's record is of the view a moment after the saved
+  frame, so those could not be checked from the log. One limit showed up: the photo on an ID card
+  is recognised as the person (0.80).
+- **Belongings, by belonging memory alone.** All 23 saved turns on which the phone matched a
+  belonging had the box on the right object. Replayed with the steel water bottle taught from one
+  frame: it was matched on 24 of the 310 frames (17 sure, 7 unsure), every one of them the steel
+  bottle, with scores within 0.05 of the phone's own on the frames both looked at. A plastic water
+  bottle stands beside it in most of those frames and was never matched: of the 953 regions looked
+  at, none but the matches reached the 0.60 it takes to be unsure, and the 190 other outlines the
+  detector called a bottle scored 0.51 at most. That is why "my water bottle" is not given to the
+  model: asked for "a water bottle" it would take either. Marked by eye, the steel bottle is
+  plainly in view in 24 of those frames, and those are the 24 matched: none was missed (the 7
+  unsure ones need the second look), the 7 frames showing only part of it at the edge of the view
+  were not matched, and nor were the 87 with only other bottles in them.
+- **Unsure matches count in a search, twice running.** The user's jacket was matched on five
+  saved turns and unsure on all five (0.62 to 0.68): soft things never look the same twice. A
+  search that waited for a sure match would have walked past it every time, so two unsure matches
+  in a row end the search with "That might be your jacket".
+- **Everything else: the language model, not the detector.** An answer key was made by eye for 263
+  saved frames (a person, a chair, a laptop, a bottle, a can in each: plainly there, plainly not,
+  or partly visible; the 316 partly visible cases are left out below). Wrong on the 611 cases
+  plainly absent and the 388 plainly there:
+
+  | Judge | Says yes, nothing there | Says no, plainly there |
+  |---|---|---|
+  | Witness-2B (eyes-ft-v2), yes at 0.7 | 3 (0.5%) | 15 (3.9%) |
+  | Witness-2B, yes at 0.9 | 0 | 42 (10.8%) |
+  | Stock LFM3, yes at 0.9 | 16 (2.6%) | 11 (2.8%) |
+  | Object detector, 0.5 | 21 (3.4%) | 121 (31.2%) |
+
+  The detector is as good as the model on people and chairs (2 of 50 and 3 of 161 wrong yeses, 4
+  of 71 and 1 of 27 missed) and misses 67 of the 69 cans, 33 of 145 laptops and 16 of 76 bottles;
+  it also knows only its 129 labels. Asking Witness-2B the bare question, without the "Answer Yes
+  or No" line, gave the same result at a bar of 0.8 (3 and 15).
+- **One very sure yes, or two sure ones.** Half-minute searches were simulated from those frames
+  (each view one frame held for 1 to 2.5 s, a look taking 0.8 s; `WatchMonitor.Policy.searching`
+  has the table). Requiring two yeses running, as the patient watch did, cut false finds only from
+  6.4% of searches to 4.8%, because a wrong yes belongs to the scene and the second look says yes
+  again; and it found a thing in view for one second 19% of the time, where one yes found it 94%.
+  The rule adopted finds it 80% of the time at one second and 94% at two, about 1.4 s after it
+  comes into view, with false finds in 4.9% of searches. With the stock model 21 to 27% of
+  searches end in a false find whatever the rule: this feature wants the fine-tuned model.
+- **On clips, with the real model** (`eyes-cli watch --search`, Witness-2B): five searches on
+  four clips in which a person appears all found them, 0.8 to 1.7 s after. Thirteen minutes of
+  clips with nobody in them gave three false finds: an empty lounge with a red bundle on a chair
+  (two looks at 0.77 and 0.81 after eleven lower ones), and twice a glass whiteboard in which the
+  reflection of someone sitting at a table can be made out. Asking twice is no help with a view
+  like the first.
+- **Partly visible counts, more often than not.** Of 142 frames with only a hand, an arm or a
+  cut-off body in them, the model says "a person" on 91 at the bar. A search for "a person" can
+  end on the user's own hand in front of the lens.
+
+What it costs: a model-judged search keeps the language model busy about three quarters of the
+time for up to 30 seconds, and the detector at two frames a second meanwhile; hot, the looks are two
+seconds apart, and at thermal state "critical" the search stops and says so. People and belongings
+cost nothing extra: face memory runs anyway, and a belonging look is a few small model runs.
+
+The by-eye answer key, each judge's scores and the two scripts behind the tables are in
+`~/Documents/s26-eyes-lab/databricks/eval/search/` (`eyes-cli check <gguf> <mmproj> --batch
+search_checks.tsv` runs another model against the key; `score.py` and `sim.py` print the tables), and
+the test clips in `~/Library/Caches/private-eye-debug/clips/`.
+
+A finished search is saved by the debug capture as a turn of its own (`route` "search"): the frame
+it ended on, the outcome, and what each look gave. That is the data to check this section against
+once it has run on the phone. `-find "a chair"` and `-watch "someone sits in the chair"` on the
+launch command start a search without anyone speaking.
+
+**Before this: the patient watch.** The first version watched without a time limit, asked the
+model only when the view had changed (`SceneSignature`), wanted two yeses, and slowed down on a
+run of noes; `WatchMonitor.Policy.calibrated` still is that policy, and `eyes-cli watch` without
+`--search` replays it. Measured then, with the stock model: 16 watches over 23 minutes of clips, 15
+right (the one false alert on the whiteboard above); a still scene held by hand for two minutes
+cost one look; a restless view 11 to 20 looks a minute. It was never run on the phone.
+
 ## Things worth knowing
 
 - LFM3's chat template opens the reply with `<think>` by default. The engine writes
@@ -318,4 +508,7 @@ What each other part is for, and the evidence (one session on the phone: 92 turn
   capture is 1440x1080. Each turn logs the thermal state.
 - LiDAR is only trusted to 5 m (16 feet); farther objects get no distance.
 - Adopting the hardware capture buttons means the volume buttons no longer change volume while the
-  app is open (Control Center still does).
+  app is open (Control Center still does). There is no taking the Camera Control alone: the
+  interaction has no choice of buttons (checked in the iOS 27.2 SDK), and its event says only
+  "primary" (the Camera Control or volume down) or "secondary" (volume up). Switching it off gives
+  the volume buttons back and sends a Camera Control press to the Camera app. Kept on, by choice.
