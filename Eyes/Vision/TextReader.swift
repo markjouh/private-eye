@@ -76,8 +76,13 @@ enum TextReader {
             // Capitals are for signs; the voice spells some of them out letter by letter.
             parts.append(line.text == line.text.uppercased() ? line.text.capitalized : line.text)
         }
-        guard !parts.isEmpty else { return nil }
-        return parts.joined(separator: ", ") + "."
+        guard var text = parts.first else { return nil }
+        // A comma between lines is the pause, and a full stop ends the reading, except where the
+        // text brings its own punctuation: a sign ending "yourself!" was read as "yourself!.".
+        for part in parts.dropFirst() {
+            text += (text.last.map { ".,;:!?".contains($0) } ?? false ? " " : ", ") + part
+        }
+        return text.last.map { ".!?".contains($0) } ?? false ? text : text + "."
     }
 
     /// True for a line that is a number ("555 010 0199", "$4.99", "500 mg", "B12") rather than a

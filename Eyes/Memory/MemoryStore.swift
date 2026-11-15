@@ -135,11 +135,18 @@ final class MemoryStore {
 
     // MARK: Belongings
 
+    /// Adds views to a belonging, creating it if new. Returns true if it already existed.
+    /// `replacing` drops what was stored under the name first: the name now means another thing.
     @discardableResult
-    func remember(belonging name: String, label: String?, samples: [[Float]], thumbnail: Data? = nil) -> Bool {
+    func remember(belonging name: String, label: String?, samples: [[Float]], thumbnail: Data? = nil, replacing: Bool = false) -> Bool {
         lock.withLock {
             defer { save() }
             if let i = contents.belongings.firstIndex(where: { Self.key($0.name) == Self.key(name) }) {
+                if replacing {
+                    contents.belongings[i] = Belonging(name: contents.belongings[i].name, label: label,
+                                                       samples: Array(samples.suffix(Self.maxSamples)), thumbnail: thumbnail)
+                    return true
+                }
                 contents.belongings[i].samples = Array((contents.belongings[i].samples + samples).suffix(Self.maxSamples))
                 if let label { contents.belongings[i].label = label }
                 if contents.belongings[i].thumbnail == nil { contents.belongings[i].thumbnail = thumbnail }

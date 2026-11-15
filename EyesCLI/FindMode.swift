@@ -79,9 +79,22 @@ func runFindMode(_ arguments: [String]) {
             print(String(format: "taught %@ from %@ (face %.0f px wide)", name, turn, Double(face.pixelWidth)))
         }
         for (name, turn) in things {
-            guard let frame = loadPixelBuffer("\(turns)/\(turn).jpg"), let record = saved(turn),
-                  let box = record.belongings.first(where: { $0.label == name })?.rect, let embedding = embedder.embed(frame, box: box)
-            else { print("could not teach \(name) from \(turn)"); return }
+            guard let frame = loadPixelBuffer("\(turns)/\(turn).jpg"), let record = saved(turn) else { print("could not teach \(name) from \(turn)"); return }
+            // A turn where the phone matched nothing (the thing was being taught in it): learn it from
+            // the frame the way the app does, by what the camera is pointed at.
+            guard let box = record.belongings.first(where: { $0.label == name })?.rect else {
+                let shot = Snapshot(frame: frame, detections: detector.detect(in: frame), depth: nil)
+                let learned = DispatchSemaphore(value: 0)
+                Task {
+                    _ = await engine.remember(belonging: name, first: shot) { nil }
+                    learned.signal()
+                }
+                learned.wait()
+                guard let thing = store.belonging(named: name) else { print("could not teach \(name) from \(turn)"); return }
+                print("taught \(name) from \(turn) as the app would (it took \(thing.label.map { "the \($0)" } ?? "the middle of the view"))")
+                continue
+            }
+            guard let embedding = embedder.embed(frame, box: box) else { print("could not teach \(name) from \(turn)"); return }
             let label = detector.detect(in: frame).filter { overlap($0.box, box) > 0.5 }.max { $0.confidence < $1.confidence }?.label
             _ = store.remember(belonging: name, label: label, samples: [embedding])
             print("taught \(name) from \(turn) (the detector calls it \(label ?? "nothing"))")

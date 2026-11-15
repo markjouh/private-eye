@@ -133,8 +133,9 @@ struct SightingJudge {
 
     /// Unsure sightings in a row that count as found. On the frames saved from the phone the
     /// user's jacket, a soft thing that never looks the same twice, was matched on five turns and
-    /// unsure on all five (0.62 to 0.68, the bar for sure being 0.70): a search that waited for a
-    /// sure match would have walked past it every time.
+    /// unsure on all five: a search that waited for a sure match would have walked past it every
+    /// time. (The bars have since been raised, see `ThingEmbedder.acceptThreshold`; the rule stands
+    /// for the band between them.)
     var unsureNeeded = 2
     private var unsure = 0
 

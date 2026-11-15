@@ -162,7 +162,8 @@ Nutrition Label criteria, with the open failures and a manual test script for th
                                     minute, in memory), Recall (which questions are about it), SearchTarget
                                     (what a search is for and who judges it), WatchCondition, WatchMonitor
                                     (when to ask the model, when its answers mean "found"), FrameScaling
-    Eyes/Speech/                    SpeechRecognizer (always-on mic, push to talk), Speaker (streamed TTS),
+    Eyes/Speech/                    SpeechRecognizer (always-on mic, push to talk; Parakeet with Apple's
+                                    recogniser beside it), ParakeetTranscriber, Speaker (streamed TTS),
                                     VoiceSettings (speed and voice, kept across launches), AlertCue (the
                                     beep, chime and taps of a search)
     Eyes/Haptics/                   ProximityModel (obstacle logic), ProximityHaptics (Taptic Engine)
@@ -185,11 +186,49 @@ Nutrition Label criteria, with the open failures and a manual test script for th
   `FaceTracker` holds a sure name through weak frames, promotes three probable frames in a row, and
   picks good new angles to store as extra views.
 - **Belongings** (DINOv3 ViT-S/16 CLS, tight padded crop): 93% top-1 from one stored view, 97% from two.
-  At the 0.70 accept threshold the right object is accepted 87% (one view) to 95% (two views) of the
-  time and a different object of the same kind is wrongly accepted 4 to 6%; between 0.60 and 0.70 the
-  app says "might be". Plain unmarked objects cannot be told from their twins.
+  A match is sure at 0.80 and "might be" from 0.75. On Objectron photos the right object is then
+  sure 60% (one stored view) to 77% (two views) of the time and at least "might be" 77% to 90%, and
+  a different object of the same kind is called sure under 1% of the time. The bars were 0.70 and
+  0.60 until the phone met three dark backpacks in one room (2026-11-15): taught one, it called the
+  others the user's too, at 0.72 to 0.78. On 13 frames saved from that session another backpack
+  passes 0.70 in 36 to 50% of trials, 0.75 in 10 to 18% and 0.80 in none, while the right one passes
+  0.80 as often as 0.70 (`eyes-cli things eval` on a folder of those frames). Replayed with one
+  backpack taught from one frame, it is sure on both other frames of it (0.85, 0.88) and neither
+  other backpack is matched on any of their 8. The cost is on poor views of the right thing: see
+  the steel bottle under "Searching". Plain unmarked objects cannot be told from their twins.
+- **Teaching a belonging** takes the frame from the press and up to four live ones and keeps the
+  ones that agree, preferring frames where the detector's label matches the spoken name. The press
+  frame used to be the reference, and it was the odd one out in 6 of the 10 enrolments in the
+  phone's log: headphones were stored as "my water bottle". A name taught again for something
+  that looks different (under 0.80 against what is stored) now replaces the old thing, and says
+  "Replaced your …"; before, both were kept under the one name.
 - **Answers**: on a 68-question set, mean length went from 18 words to 4 and correct answers from 59
   to 65 when the style moved to per-question suffixes plus a streaming filter.
+- **Speech to text** (`ParakeetTranscriber`; measured on the Mac on 2026-11-15, not yet run on the
+  phone): 228 press recordings saved from the phone, each marked against OpenAI's gpt-transcribe.
+  "Commands kept" is how many of the 51 recordings that are app commands by the reference text
+  still parse to the same command.
+
+  | Recogniser | Words wrong | Exactly right | Commands kept |
+  |---|---|---|---|
+  | Apple's on-device recogniser, as it ran on the phone | 14.8% | 173 | 46 |
+  | Parakeet Unified 0.6B streaming, 0.56 s look-ahead, silence before and after (in the app) | 7.4% | 194 | 46 |
+  | The same without the silence | 9.1% | 183 | 46 |
+  | Its 0.08 s look-ahead export, with the silence | 9.3% | 188 | 43 |
+  | Nemotron streaming 0.6B | 11.2% | 165 | 38 |
+  | Parakeet 120M streaming | 24.8% | 100 | 24 |
+  | Whole clip at once: Whisper large-v3-turbo | 7.2% | 196 | 48 |
+  | Whole clip at once: Parakeet Ultra | 8.5% | 186 | 44 |
+
+  On the Mac the streaming model has its transcript 32 ms after the audio ends (47 at worst), the
+  0.6 s of trailing silence included; Apple's on the phone took a median 71 ms. What Parakeet gets
+  wrong that Apple's does not: it writes down other people talking nearby, in front of the user's
+  own words ("That seemed like they would be watch for a t-shirt…"), and it has no ear for
+  names and homophones ("Read" as "Red", a first name as "coal"). Apple's recogniser still hears every
+  press and its transcript is logged beside Parakeet's (`speech: Parakeet "…"; Apple "…"`), which
+  is the data to settle this on the phone; `-stt apple` goes back to it. The recordings, the
+  reference, every model's output and the scripts are in
+  `~/Documents/s26-eyes-lab/databricks/eval/stt/`.
 - **On the phone**: LFM3 loads in about 1 s, reads a frame in about 0.7 s (it starts when the press
   begins, so it is usually done by the time a question has been spoken), 40 to 50 tokens/s cool and
   about 32 at thermal "serious". Across one session of 54 spoken questions the first words came a
@@ -393,7 +432,7 @@ used alone:
 | Target | Judge | Found when |
 |---|---|---|
 | Someone the user has introduced ("Dana") | Face memory (ArcFace), which already names faces in view about three times a second | It is sure of that name once. An unsure match is left to `FaceTracker`, which makes three in a row sure. |
-| One of the user's own things ("my water bottle") | Belonging memory (DINOv3), looking for that one thing about three times a second | One sure match (0.70 or more), or two unsure ones running (0.60 to 0.70), said as "That might be your …". |
+| One of the user's own things ("my water bottle") | Belonging memory (DINOv3), looking for that one thing about three times a second | One sure match (0.80 or more), or two unsure ones running (0.75 to 0.80), said as "That might be your …". |
 | Anything else ("a chair", "the exit", "someone sits in the chair") | The language model, asked yes or no about the newest frame, back to back (about one look a second on the phone) | One very sure yes (0.95 for Witness-2B), or two sure ones running (0.7). |
 
 What was measured:
@@ -418,11 +457,14 @@ What was measured:
   model: asked for "a water bottle" it would take either. Marked by eye, the steel bottle is
   plainly in view in 24 of those frames, and those are the 24 matched: none was missed (the 7
   unsure ones need the second look), the 7 frames showing only part of it at the edge of the view
-  were not matched, and nor were the 87 with only other bottles in them.
+  were not matched, and nor were the 87 with only other bottles in them. (Those are the numbers
+  at the old bars, 0.70 and 0.60. At 0.80 and 0.75 the same replay is sure on 8 of the 24, unsure
+  on 5 and misses 11, the out-of-focus and half-hidden ones, and still matches nothing else.)
 - **Unsure matches count in a search, twice running.** The user's jacket was matched on five
   saved turns and unsure on all five (0.62 to 0.68): soft things never look the same twice. A
   search that waited for a sure match would have walked past it every time, so two unsure matches
-  in a row end the search with "That might be your jacket".
+  in a row end the search with "That might be your jacket". (Since the bars were raised a score
+  under 0.75 is no match at all, so that jacket, as it was taught then, would not be found.)
 - **Everything else: the language model, not the detector.** An answer key was made by eye for 263
   saved frames (a person, a chair, a laptop, a bottle, a can in each: plainly there, plainly not,
   or partly visible; the 316 partly visible cases are left out below). Wrong on the 611 cases

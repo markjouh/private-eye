@@ -37,6 +37,9 @@ struct FoundBelonging {
 enum EnrollOutcome {
     /// `renamedFrom` is set when this face was already known under another name, which is replaced.
     case remembered(samples: Int, renamedFrom: String?, alreadyKnown: Bool)
+    /// A belonging's name was given to something that does not look like what it meant before; the
+    /// old views were dropped.
+    case replaced(samples: Int)
     case nothingInView
     /// The face is too small in the frame to learn reliably.
     case tooFar
@@ -217,39 +220,55 @@ final class MemoryEngine: @unchecked Sendable {
     /// different things (the user moved the phone).
     static let enrollThingConsistency = ThingEmbedder.maybeThreshold
     /// When a newly named thing matches an existing belonging this well it is taken to be that
-    /// belonging under a new name. Higher than the accept threshold: at 0.78 about 1% of look-alikes
-    /// score this high (see the README's belonging numbers), and wrongly merging two of the user's
-    /// things is worse than keeping one thing under two names.
-    static let sameThing: Float = 0.78
+    /// belonging under a new name: the score at which the app would call it theirs outright. Lower,
+    /// and two things of the user's that look alike would be merged, which is worse than one thing
+    /// kept under two names (two dark backpacks scored up to 0.78 against each other on the phone).
+    static let sameThing = ThingEmbedder.acceptThreshold
+    /// A name taught again is the same thing seen once more when the new views match the stored ones
+    /// this well, and the views are then kept together. Anything less and the name now means what is
+    /// in front of the camera, and the old views are dropped: kept, they would make the name fit
+    /// both things (on the phone, a second backpack taught as "my backpack" made every backpack the
+    /// user's), and a first attempt that caught the wrong thing could never be corrected by trying again.
+    static let sameAgain = ThingEmbedder.acceptThreshold
 
-    /// Learns the thing the phone is pointed at under `name`: the frame from when the user started
-    /// speaking, then a few live ones a moment apart, so it is stored from slightly different views.
+    /// Learns the thing the phone is pointed at under `name`. It looks at `first` (the frame from the
+    /// press) and at a few live frames a moment apart, and keeps the views that agree (see `agreeing`).
     func remember(belonging name: String, first: Snapshot?, live: @escaping () -> Snapshot?) async -> EnrollOutcome {
-        var samples: [[Float]] = []
-        var label: String?
-        var thumbnail: Data?
-        for attempt in 0..<5 where samples.count < 3 {
+        struct View {
+            let embedding: [Float]
+            let label: String?
+            let picture: Data?
+            let named: Bool
+        }
+        var views: [View] = []
+        var chosen: [Int] = []
+        for attempt in 0..<5 where chosen.count < 3 {
             if attempt > 1 { try? await Task.sleep(for: .milliseconds(250)) }
             guard let shot = attempt == 0 ? first : live() else { continue }
-            let view: (embedding: [Float], label: String?, picture: Data?)? = await run {
+            let view: View? = await run {
                 let region = BelongingTargeting.enrolmentTarget(in: shot.detections, named: name)
                 guard let embedding = self.things()?.embed(shot.frame, box: region.box) else { return nil }
-                return (embedding, region.label, ThingEmbedder.crop(shot.frame, box: region.box).flatMap(PixelWarp.jpeg))
+                return View(embedding: embedding, label: region.label,
+                            picture: ThingEmbedder.crop(shot.frame, box: region.box).flatMap(PixelWarp.jpeg),
+                            named: BelongingTargeting.names(name, label: region.label))
             }
             guard let view else { continue }
-            let agreement = samples.first.map { PixelWarp.cosine($0, view.embedding) }
+            let agreement = views.first.map { PixelWarp.cosine($0.embedding, view.embedding) }
             print("[eyes] learn \(name): frame \(attempt) took " + (view.label.map { "the \($0)" } ?? "the middle of the view")
                   + (agreement.map { String(format: ", %.2f like the first", $0) } ?? ""))
-            if let agreement, agreement < Self.enrollThingConsistency { continue }
-            if samples.isEmpty {
-                label = view.label
-                thumbnail = view.picture
-            }
-            // A frame identical to one already kept teaches nothing.
-            if samples.contains(where: { PixelWarp.cosine($0, view.embedding) > 0.98 }) { continue }
-            samples.append(view.embedding)
+            views.append(view)
+            chosen = Self.agreeing(views.map { ($0.embedding, $0.named) })
         }
-        guard !samples.isEmpty else { return .nothingInView }
+        guard let reference = chosen.first else { return .nothingInView }
+        if chosen.count < views.count {
+            print("[eyes] learn \(name): kept \(chosen.count) of \(views.count) frames, the ones like frame \(reference)")
+        }
+        var samples: [[Float]] = []
+        // A frame identical to one already kept teaches nothing.
+        for i in chosen where samples.count < 3 && !samples.contains(where: { PixelWarp.cosine($0, views[i].embedding) > 0.98 }) {
+            samples.append(views[i].embedding)
+        }
+        let label = views[reference].label, thumbnail = views[reference].picture
 
         var renamedFrom: String?
         let twin = store.belongings.first { known in
@@ -261,8 +280,35 @@ final class MemoryEngine: @unchecked Sendable {
             _ = store.forget(twin.name)
             samples = twin.samples + samples
         }
-        let existed = store.remember(belonging: name, label: label, samples: samples, thumbnail: thumbnail)
+        // The same name taught before, for something that looked different: the name moves.
+        let before = store.belongings.first { MemoryStore.key($0.name) == MemoryStore.key(name) }
+        let replacing = before.map { known in !samples.contains { store.similarity(of: $0, to: known) >= Self.sameAgain } } ?? false
+        let existed = store.remember(belonging: name, label: label, samples: samples, thumbnail: thumbnail, replacing: replacing)
+        if replacing, renamedFrom == nil { return .replaced(samples: samples.count) }
         return .remembered(samples: samples.count, renamedFrom: renamedFrom, alreadyKnown: existed)
+    }
+
+    /// Which of the views taken during one enrolment show the thing being named: the view that most
+    /// others agree with (cosine of `enrollThingConsistency` or more), and those others; the first
+    /// index returned is that view. The user aims by feel and the phone moves while they speak, so
+    /// any one frame, the first included, may show something else. On the phone the frame from the
+    /// press was the odd one out in 6 of 10 enrolments: learning it and dropping the live frames
+    /// that disagreed stored headphones as "my water bottle" and a blurred half of a backpack in
+    /// place of four sharp views of it.
+    ///
+    /// Views where the detector's label matched the spoken name are trusted over the rest: when
+    /// there are any, the choice is among them (a bottle named in one frame beats four frames of
+    /// whatever was under the middle of the view once the phone had moved on).
+    static func agreeing(_ views: [(embedding: [Float], named: Bool)]) -> [Int] {
+        let named = views.indices.filter { views[$0].named }
+        var best: [Int] = []
+        for candidate in named.isEmpty ? Array(views.indices) : named {
+            let group = views.indices.filter {
+                $0 == candidate || PixelWarp.cosine(views[candidate].embedding, views[$0].embedding) >= enrollThingConsistency
+            }
+            if group.count > best.count { best = [candidate] + group.filter { $0 != candidate } }
+        }
+        return best
     }
 
     /// Looks for one belonging in the given frames, newest first; nil when it is in none of them.

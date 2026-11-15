@@ -28,8 +28,20 @@ final class ThingEmbedder {
     /// 0.60 the right object gains almost nothing. The five objects filmed in more than one clip (three
     /// of them in different places) were accepted from another clip's enrolment nearly as often: 83% |
     /// 91% at 0.70.
-    static let acceptThreshold: Float = 0.70
-    static let maybeThreshold: Float = 0.60
+    ///
+    /// Those look-alikes differ more than the ones a person actually has to tell apart. On the phone,
+    /// three dark backpacks in one room (13 saved frames, the same test): another backpack was
+    /// accepted in 36% | 50% of trials at 0.70 and 10% | 18% at 0.75, and in none at 0.80 (the highest
+    /// look-alike pair scored 0.78), while the right backpack was accepted as often at 0.80 as at 0.70
+    /// (56% | 72%). The bars were 0.70 and 0.60 until then, and the app called every backpack the
+    /// user's. So a sure match needs 0.80, and "possibly" starts at 0.75, not lower: 0.70 to 0.75 is
+    /// mostly look-alikes when there are any about. The price is paid on poor views of the right
+    /// thing: a steel bottle, out of focus or half hidden on many of 24 saved frames, is now sure on
+    /// 8 of them, possibly on 5 and missed on 11, where the old bars matched all 24 (17 sure); on the
+    /// Objectron photos the right object is at least "possibly" in 77% | 90% of trials, down from
+    /// 95% | 98%. Teaching a thing from a second side wins much of that back.
+    static let acceptThreshold: Float = 0.80
+    static let maybeThreshold: Float = 0.75
     /// With several belongings remembered, the one asked about should also beat every other on the
     /// same region by this much. In the same test, with all objects enrolled, a look-alike that was
     /// itself a belonging was taken for the one asked about in 0.3% of trials instead of 3.8% at 0.70

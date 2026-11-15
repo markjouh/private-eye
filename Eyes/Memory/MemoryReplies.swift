@@ -37,7 +37,7 @@ enum MemoryReplies {
     static func remembered(person name: String, _ outcome: EnrollOutcome) -> String {
         switch outcome {
         case .remembered(_, let renamedFrom?, _): "\(renamedFrom) renamed to \(name)."
-        case .remembered(_, nil, true): "Updated \(name)."
+        case .remembered(_, nil, true), .replaced: "Updated \(name)."
         case .remembered(_, nil, false): "Remembered \(name)."
         case .nothingInView: "No face in view."
         case .tooFar: "Too far. Move closer."
@@ -52,6 +52,8 @@ enum MemoryReplies {
         case .remembered(_, let renamedFrom?, _): "Your \(renamedFrom) is now your \(name)."
         case .remembered(_, nil, true): "Updated your \(name)."
         case .remembered(_, nil, false): "Remembered your \(name)."
+        // Said differently from "Updated": the old one is gone, which the user should hear.
+        case .replaced: "Replaced your \(name) with this one."
         case .nothingInView, .tooFar, .unclear: "I couldn't get a look at it. Point the camera at it and try again."
         }
     }

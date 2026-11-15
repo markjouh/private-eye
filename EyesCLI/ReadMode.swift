@@ -60,5 +60,15 @@ private func checkReadRequests() {
         failed += 1
         print("FAIL  no numbers in view should leave the question to the model")
     }
-    print(failed == 0 ? "all \(cases.count + 2) read-request checks pass" : "\(failed) FAILED")
+    let sign = ["Please clean", "up after yourself!"].map { TextReader.Line(text: $0, box: .zero, confidence: 1) }
+    if TextReader.spoken(sign) != "Please clean, up after yourself!" {
+        failed += 1
+        print("FAIL  text with its own punctuation: \(TextReader.spoken(sign) ?? "nil")")
+    }
+    let labels = ["Exit.", "Push"].map { TextReader.Line(text: $0, box: .zero, confidence: 1) }
+    if TextReader.spoken(labels) != "Exit. Push." {
+        failed += 1
+        print("FAIL  a line ending in a full stop: \(TextReader.spoken(labels) ?? "nil")")
+    }
+    print(failed == 0 ? "all \(cases.count + 4) read-request checks pass" : "\(failed) FAILED")
 }

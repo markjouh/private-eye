@@ -65,6 +65,13 @@ enum BelongingTargeting {
         return centre
     }
 
+    /// True when the detector's label for a region shares a word with what the user called the thing
+    /// ("water bottle" and "bottle"): the strongest sign that the region is the thing they mean.
+    static func names(_ name: String, label: String?) -> Bool {
+        guard let label else { return false }
+        return !words(name).isDisjoint(with: words(label))
+    }
+
     /// The regions worth embedding when looking for a belonging, most promising first.
     ///
     /// Each one costs a model run, so the list is short: detections with the label the belonging had

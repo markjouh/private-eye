@@ -22,6 +22,13 @@ if [ ! -f Models/LFM3-VL-2B-QAD-Q4_0.gguf ]; then
   hf download LiquidAI/LFM3-VL-2B-GGUF mmproj-LFM3-VL-2B-Q8_0.gguf --local-dir Models
 fi
 
+# Speech to text: Parakeet Unified 0.6B, the streaming export the app uses (ParakeetTranscriber).
+if [ ! -d Models/parakeet-unified-en-0.6b ]; then
+  hf download FluidInference/parakeet-unified-en-0.6b-coreml --local-dir Models/parakeet-unified-en-0.6b \
+    --include "config.json" "metadata.json" "vocab.json" "parakeet_unified_decoder.mlmodelc/*" \
+    "parakeet_unified_joint_decision_single_step.mlmodelc/*" "parakeet_unified_encoder_streaming_70_7_7_int8.mlmodelc/*"
+fi
+
 if [ ! -d Models/yoloe26m.mlpackage ]; then
   [ -d tools/.venv ] || uv venv --python 3.12 tools/.venv
   uv pip install -q --python tools/.venv/bin/python ultralytics coremltools "numpy<2.3" pillow

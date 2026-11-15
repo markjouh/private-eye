@@ -329,7 +329,9 @@ enum Commands {
         var kept: [String] = []
         for word in said.split(separator: " ").map(String.init) where kept.count < 3 {
             let lower = word.lowercased()
-            guard word.allSatisfy({ $0.isLetter || $0 == "'" || $0 == "-" }),
+            // A possessive is someone's thing, not someone: "This is John's water bottle" was taken
+            // as an introduction to "John's".
+            guard word.allSatisfy({ $0.isLetter || $0 == "'" || $0 == "-" }), !lower.hasSuffix("'s"),
                   !trailers.contains(lower), !notNames.contains(lower),
                   !requireCapital || word.first?.isUppercase == true
             else { break }
@@ -351,7 +353,8 @@ enum Commands {
     /// Trimmed, single-spaced, without sentence punctuation (apostrophes and hyphens stay).
     private static func clean(_ text: String) -> String {
         let kept = text.unicodeScalars.map { scalar -> Character in
-            let c = Character(scalar)
+            // The recogniser sometimes writes a typographic apostrophe.
+            let c = scalar == "\u{2019}" ? "'" : Character(scalar)
             return (c.isLetter || c.isNumber || c == "'" || c == "-" || c == " ") ? c : " "
         }
         return String(kept).split(separator: " ").joined(separator: " ")

@@ -283,6 +283,8 @@ final class AppModel: ObservableObject {
             self.question = text
             self.turnNotes.append(String(format: "%.2fs heard so far: %@", Date().timeIntervalSince(self.pressStarted), text))
         }
+        // What each speech recogniser made of a press, for comparing them afterwards.
+        recognizer.onCompared = { [weak self] line in self?.log(line) }
         speaker.onFinished = { [weak self] in
             guard let self, self.phase == .speaking else { return }
             self.noticeSpeaking = nil
@@ -320,6 +322,10 @@ final class AppModel: ObservableObject {
                 // VoiceOver users get this from the status announcement instead.
                 if !onboarding, !UIAccessibility.isVoiceOverRunning { speaker.say("Ready.") }
                 listenForIntents()
+                // After the language model, so the two do not load at once. Presses are
+                // transcribed by Apple's recogniser until this is done.
+                let recognizer = recognizer
+                Task { await recognizer.loadParakeet() }
                 // `-find "a chair"` and `-watch "someone sits in the chair"` start a search without
                 // anyone saying so, for tests.
                 let people = memory.store.people.map(\.name), things = memory.store.belongings.map(\.name)
@@ -386,8 +392,8 @@ final class AppModel: ObservableObject {
             } else {
                 heard = await recognizer.finish()
                 guard turn == self.turn else { return }
-                log(String(format: "transcript settled %.0f ms after release%@", Date().timeIntervalSince(turnReleased) * 1000,
-                           recognizer.keptListening ? " (kept listening: still speaking at release)" : ""))
+                log(String(format: "transcript settled %.0f ms after release, by %@%@", Date().timeIntervalSince(turnReleased) * 1000,
+                           recognizer.heardBy, recognizer.keptListening ? " (kept listening: still speaking at release)" : ""))
             }
             // A tap, or a hold with nothing intelligible, gets a quick description of the view.
             await respond(to: heard.isEmpty ? Self.quickQuestion : heard, dictated: !heard.isEmpty, turn: turn)
@@ -1182,6 +1188,15 @@ final class AppModel: ObservableObject {
         keyframes.clear()
         print("[eyes] recent frames cleared")
         endSearch(.leftTheScreen)
+        // An answer still being worked out goes too. The app is suspended before it is ready, and it
+        // would be finished and spoken when the app is next opened, about a view long gone: on the
+        // phone a tap as the app was closed was answered 171 s later, on the way back in.
+        if phase == .thinking {
+            turn += 1
+            releaseModel()
+            phase = .idle
+            print("[eyes] turn dropped: the app left the screen")
+        }
     }
 
     /// At thermal state "critical" a search stops, and says so; below that the looks only come

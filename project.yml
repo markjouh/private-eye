@@ -12,6 +12,11 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+packages:
+  # Parakeet speech-to-text, run through Core ML.
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    exactVersion: 0.18.3
 targets:
   Eyes:
     type: application
@@ -28,10 +33,15 @@ targets:
         buildPhase: resources
       - path: Models/mmproj-LFM3-VL-2B-Q8_0.gguf
         buildPhase: resources
+      # Compiled Core ML bundles, copied as they are (see ParakeetTranscriber).
+      - path: Models/parakeet-unified-en-0.6b
+        type: folder
+        buildPhase: resources
     dependencies:
       - framework: Vendor/llama.xcframework
         embed: true
       - target: EyesControls
+      - package: FluidAudio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(EYES_BUNDLE_ID)
