@@ -51,11 +51,23 @@ func runSafetyMode(_ questions: [String]) {
     check("a group", SceneDescription.known(detections: [person(0.0), person(0.3), person(0.6), person(0.75)], faces: [face("Sarah", 0.36)]),
           "Sarah ahead. 4 people in view.")
     let bottle = CGRect(x: 0.05, y: 0.5, width: 0.15, height: 0.3)
-    check("their own thing, said once",
+    check("their own things, each said once, an unsure match as such",
           SceneDescription.known(detections: [person(0.7)], faces: [], belongings: [
               FoundBelonging(name: "water bottle", box: bottle, distance: 0.5, tentative: false, score: 0.8),
               FoundBelonging(name: "water bottle", box: bottle.insetBy(dx: 0.01, dy: 0.01), distance: 0.5, tentative: false, score: 0.75),
               FoundBelonging(name: "keys", box: bottle, distance: 0.5, tentative: true, score: 0.62)]),
-          "Person to your right. Your water bottle to your left.")
+          "Person to your right. Your water bottle to your left. Possibly your keys to your left.")
+    // "What is this?" and a tap on a close-up: the user's own thing, when the camera is pointed at it.
+    let middle = CGRect(x: 0.2, y: 0.25, width: 0.6, height: 0.45)
+    func thing(_ name: String, _ box: CGRect, tentative: Bool = false) -> FoundBelonging {
+        FoundBelonging(name: name, box: box, distance: 0.5, tentative: tentative, score: tentative ? 0.67 : 0.8)
+    }
+    check("pointed at their own thing", MemoryReplies.thisIs([thing("jacket", middle)]) ?? "nil", "Your jacket.")
+    check("pointed at it, an unsure match", MemoryReplies.thisIs([thing("jacket", middle, tentative: true)]) ?? "nil", "Possibly your jacket.")
+    check("their thing off to one side", MemoryReplies.thisIs([thing("water bottle", bottle)]) ?? "nil", "nil")
+    check("their thing behind what is held up",
+          MemoryReplies.thisIs([thing("water bottle", CGRect(x: 0.48, y: 0.05, width: 0.27, height: 0.47))]) ?? "nil", "nil")
+    check("two of their things, the one in the middle",
+          MemoryReplies.thisIs([thing("water bottle", bottle), thing("jacket", middle, tentative: true)]) ?? "nil", "Possibly your jacket.")
     print(failed == 0 ? "all code-built replies ok" : "\(failed) FAILED")
 }

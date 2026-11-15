@@ -32,7 +32,8 @@ enum SceneDescription {
     }
 
     /// Everyone not named, and the user's own things: "Person ahead.", "2 people to your left.",
-    /// "4 people in view." (a group is counted whole, named or not), "Your keys to your right."
+    /// "4 people in view." (a group is counted whole, named or not), "Your keys to your right.",
+    /// "Possibly your jacket ahead." for a match the app is unsure of.
     static func others(detections: [Detection], faces: [RecognizedFace], belongings: [FoundBelonging] = []) -> String {
         let everyone = people(in: detections, faces: faces)
         let strangers = everyone.filter { $0.name == nil }
@@ -46,8 +47,8 @@ enum SceneDescription {
         }
         // Each of the user's things is one object, said once however many outlines matched it.
         var said = Set<String>()
-        for thing in belongings where !thing.tentative && said.insert(thing.name).inserted {
-            sentences.append("Your \(thing.name) \(place(thing.box)).")
+        for thing in belongings where said.insert(thing.name).inserted {
+            sentences.append("\(thing.tentative ? "Possibly your" : "Your") \(thing.name) \(place(thing.box)).")
         }
         return sentences.joined(separator: " ")
     }

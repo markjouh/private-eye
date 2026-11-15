@@ -2,6 +2,13 @@ import AVFoundation
 import CoreImage
 import Foundation
 
+/// A camera frame, how sharp it is (see `Sharpness`) and when it arrived.
+struct ScoredFrame {
+    let buffer: CVPixelBuffer
+    let sharpness: Float
+    let date: Date
+}
+
 /// Owns the capture session. Frames arrive upright in portrait on `videoQueue`; each one is handed to
 /// `onFrame` together with the matching LiDAR depth (when the phone has LiDAR) and kept as
 /// `latestFrame`. Frames that arrive while `onFrame` is still running are dropped.
@@ -19,6 +26,16 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private let lock = NSLock()
     private var latest: CVPixelBuffer?
     private var latestDate: Date?
+    /// Those of the last few frames that could still be the sharpest recent one, newest last: a frame
+    /// is let go as soon as a newer one is at least as sharp. That is usually one or two frames, which
+    /// matters because the camera has only so many buffers to hand out and stops delivering when too
+    /// many are held.
+    private var recent: [ScoredFrame] = []
+    /// The sharpness of the last few frames, all of them, for the log.
+    private var recentScores: [Float] = []
+    private static let recentFrames = 5
+    private static let recentSeconds = 0.2
+    private var framesDropped = 0
     private var lastDepth: DepthMap?
     private var framesSinceDepth = 0
     private let ciContext = CIContext()
@@ -50,9 +67,31 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         sessionQueue.async { if self.session.isRunning { self.session.stopRunning() } }
     }
 
-    func latestCGImage() -> CGImage? {
-        guard let frame = latestFrame else { return nil }
-        return ciContext.createCGImage(CIImage(cvPixelBuffer: frame), from: CGRect(
+    /// The sharpest of the frames that arrived in the last fifth of a second, which is the one to
+    /// show the language model: the newest is often smeared by the phone still moving into place.
+    /// Nil until the camera has delivered a frame.
+    func sharpestRecentFrame() -> ScoredFrame? {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        let fresh = recent.filter { now.timeIntervalSince($0.date) <= Self.recentSeconds }
+        // With the camera stalled there is nothing fresh; the last frame it gave is all there is.
+        return fresh.max { $0.sharpness < $1.sharpness } ?? recent.last
+    }
+
+    /// The sharpness of the last few frames, oldest first, for the log.
+    var recentSharpness: String {
+        lock.lock(); defer { lock.unlock() }
+        return recentScores.map { String(format: "%.0f", $0) }.joined(separator: " ")
+    }
+
+    /// How many frames the camera has thrown away because the app was holding too many of its buffers.
+    var droppedFrames: Int {
+        lock.lock(); defer { lock.unlock() }
+        return framesDropped
+    }
+
+    func cgImage(of frame: CVPixelBuffer) -> CGImage? {
+        ciContext.createCGImage(CIImage(cvPixelBuffer: frame), from: CGRect(
             x: 0, y: 0, width: CVPixelBufferGetWidth(frame), height: CVPixelBufferGetHeight(frame)))
     }
 
@@ -162,10 +201,14 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
                                 didOutput collection: AVCaptureSynchronizedDataCollection) {
-        guard let video = collection.synchronizedData(for: output) as? AVCaptureSynchronizedSampleBufferData,
-              !video.sampleBufferWasDropped,
-              let buffer = CMSampleBufferGetImageBuffer(video.sampleBuffer)
-        else { return }
+        guard let video = collection.synchronizedData(for: output) as? AVCaptureSynchronizedSampleBufferData else { return }
+        if video.sampleBufferWasDropped {
+            if video.droppedReason == .outOfBuffers {
+                lock.lock(); framesDropped += 1; lock.unlock()
+            }
+            return
+        }
+        guard let buffer = CMSampleBufferGetImageBuffer(video.sampleBuffer) else { return }
         if let depth = collection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData,
            !depth.depthDataWasDropped {
             let portrait = CVPixelBufferGetWidth(buffer) < CVPixelBufferGetHeight(buffer)
@@ -185,9 +228,14 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     private func deliver(_ buffer: CVPixelBuffer, depth: DepthMap?) {
+        let frame = ScoredFrame(buffer: buffer, sharpness: Sharpness.score(buffer), date: Date())
         lock.lock()
         latest = buffer
-        latestDate = Date()
+        latestDate = frame.date
+        recent.removeAll { $0.sharpness <= frame.sharpness || frame.date.timeIntervalSince($0.date) > Self.recentSeconds }
+        recent.append(frame)
+        recentScores.append(frame.sharpness)
+        if recentScores.count > Self.recentFrames { recentScores.removeFirst() }
         lock.unlock()
         onFrame?(buffer, depth)
     }

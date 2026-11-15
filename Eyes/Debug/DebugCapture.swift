@@ -150,7 +150,9 @@ final class DebugCapture: @unchecked Sendable {
 
     /// Saves one turn as `turns/<id>.json`, with `<id>.jpg` (the frame), `<id>-depth.jpg` (LiDAR, near
     /// is bright, no reading is blue) and `<id>.m4a` (what the microphone heard) when there were any.
-    func save(_ turn: TurnRecord, frame: CVPixelBuffer?, depth: DepthMap?, audio: URL?) {
+    /// `frame` is the one the answer came from. `atPress` is the newest frame when the press began,
+    /// given when that was a different one; it is saved beside it as `-press.jpg`.
+    func save(_ turn: TurnRecord, frame: CVPixelBuffer?, atPress: CVPixelBuffer? = nil, depth: DepthMap?, audio: URL?) {
         guard isEnabled else { return }
         queue.async {
             let base = self.turns.appendingPathComponent(turn.id)
@@ -158,14 +160,15 @@ final class DebugCapture: @unchecked Sendable {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             try? encoder.encode(turn).write(to: base.appendingPathExtension("json"))
-            if let frame {
+            for (frame, name) in [(frame, turn.id + ".jpg"), (atPress, turn.id + "-press.jpg")] {
+                guard let frame else { continue }
                 let w = CGFloat(CVPixelBufferGetWidth(frame)), h = CGFloat(CVPixelBufferGetHeight(frame))
                 // A frame the text recogniser read is kept whole: a misreading can only be looked
                 // into at the size it was read at.
                 let scale = turn.route == "text" ? 1 : min(1, Self.frameSide / max(w, h))
                 let small = PixelWarp.warp(frame, toSource: CGAffineTransform(scaleX: 1 / scale, y: 1 / scale),
                                            width: Int(w * scale), height: Int(h * scale))
-                try? small.flatMap(PixelWarp.jpeg)?.write(to: base.appendingPathExtension("jpg"))
+                try? small.flatMap(PixelWarp.jpeg)?.write(to: self.turns.appendingPathComponent(name))
             }
             if let depth, let picture = Self.picture(of: depth) {
                 try? PixelWarp.jpeg(picture)?.write(to: self.turns.appendingPathComponent(turn.id + "-depth.jpg"))
@@ -208,7 +211,7 @@ final class DebugCapture: @unchecked Sendable {
         let names = ((try? FileManager.default.contentsOfDirectory(atPath: turns.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
         for name in names.dropLast(Self.maxTurns) {
             let base = turns.appendingPathComponent(String(name.dropLast(5)))
-            for file in [".json", ".jpg", "-depth.jpg", ".m4a"] {
+            for file in [".json", ".jpg", "-press.jpg", "-depth.jpg", ".m4a"] {
                 try? FileManager.default.removeItem(atPath: base.path + file)
             }
         }

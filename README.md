@@ -12,7 +12,8 @@ called `Eyes`.)
   left, can center, phone right." The app says who is there and which of your own things are in
   view; the language model describes the rest.
 - **Hold and speak**: ask a question about what the camera sees. LFM3-VL-2B answers in a few words
-  ("Kettle on stove, right."), about the frame captured when the press began.
+  ("Kettle on stove, right."), about the sharpest frame from when the press began, or a sharper one
+  that comes while you are still speaking.
 - **"Read this"** / "What does it say?": the text in view, read out as printed by Apple's on-device
   text recogniser. **"What is the ID number?"** (any question asking for a number) gets just the
   numbers printed in view, from the same recogniser.
@@ -20,7 +21,9 @@ called `Eyes`.)
 - **People**: "This is Sarah" teaches a face; then "Who is this?", "Where is Sarah?", and descriptions
   use the name. "Forget Sarah", "Forget everyone", "Who do you know?".
 - **Belongings**: "Remember this as my water bottle" teaches a thing; "Where is my water bottle?" says
-  where it is in view, or where and when it was last seen.
+  where it is in view, or where and when it was last seen. Pointed at it, a tap or "What is this?"
+  gets "Your water bottle.", or "Possibly your water bottle." when the match is an unsure one.
+  Teaching a thing again adds views of it, which is what makes an unsure match a sure one.
 - **Crossing questions** ("is it safe to cross?") never reach the model: the reply lists the vehicles
   and signals detected and declines to judge.
 - **Action button**: Settings > Action Button > Shortcut > Private Eye > "Describe What's Ahead".
@@ -67,7 +70,7 @@ The project file is generated: edit `project.yml` and rerun `xcodegen generate` 
 
     xcodebuild -project Eyes.xcodeproj -scheme EyesCLI -configuration Release -derivedDataPath build build
     alias eyes-cli=build/Build/Products/Release/eyes-cli
-    M="Models/LFM3-VL-2B-QAD-Q4_0.gguf Models/mmproj-LFM3-VL-2B-Q8_0.gguf"
+    M="Models/eyes-ft-v2-Q4_K_M.gguf Models/mmproj-LFM3-VL-2B-Q8_0.gguf"   # stock: LFM3-VL-2B-QAD-Q4_0.gguf
     D="Models/yoloe26m.mlpackage Eyes/Resources/yoloe_labels.json"
 
 | Mode | What it checks |
@@ -78,6 +81,7 @@ The project file is generated: edit `project.yml` and rerun `xcodegen generate` 
 | `eyes-cli safety "Can I cross now?"` | Which questions are routed away from the model, and every reply built by code: crossing, distance ahead, who is in view. |
 | `eyes-cli commands` | Voice-command parser against 99 sentences. |
 | `eyes-cli read photo.jpg ...` | Text reading: every line the recogniser found with its confidence, and what would be read aloud (`--numbers`: to a question asking for a number). With no photo, checks which questions are sent to it. |
+| `eyes-cli sharp photo.jpg ...` | The sharpness score of each frame, which decides which one the model is given. With no photo, checks that the score falls as a picture is smeared. |
 | `eyes-cli faces pairs / identify / engine / tracker / quality ...` | Face verification, identification with strangers, enrol-recognise-rename-forget end to end, the frame-to-frame naming logic, and Vision's quality scores (LFW photos). |
 | `eyes-cli things eval ...` | Belonging matching: score distributions, retrieval, threshold trade-offs (Objectron photos). |
 | `eyes-cli belongings ...` | Belonging memory end to end: enrol, find, reject look-alikes, rename, last seen. |
@@ -97,8 +101,9 @@ front of the camera). In the app's Caches folder it keeps:
   every detection with confidence and LiDAR distance, faces and
   belongings with match scores, who and what was remembered at the time, the thermal state, and the
   turn's log lines with seconds since the press began (partial transcripts, time to first words).
-- `turns/<id>.jpg` the frame the turn was about, `<id>-depth.jpg` the LiDAR map (bright is near,
-  blue is no reading), `<id>.m4a` what the microphone heard during the press.
+- `turns/<id>.jpg` the frame the answer came from, `<id>-press.jpg` the newest frame when the press
+  began if that was a different one, `<id>-depth.jpg` the LiDAR map (bright is near, blue is no
+  reading), `<id>.m4a` what the microphone heard during the press.
 
 The last 250 turns are kept. To copy it to the Mac and draw the boxes on each frame:
 
@@ -120,7 +125,7 @@ Nutrition Label criteria, with the open failures and a manual test script for th
     Eyes/Surroundings.swift         replies built from measurements: crossing questions, distance ahead, shared phrasing
     Eyes/LLM/                       LLMEngine (LFM3-VL via llama.cpp), AnswerStyle (per-question prompts,
                                     streaming filter, style guide), VLMService (runs it off the main thread)
-    Eyes/Vision/                    CameraController (capture + LiDAR), ObjectDetector, MaskShader, DepthMap, TextReader
+    Eyes/Vision/                    CameraController (capture + LiDAR), Sharpness, ObjectDetector, MaskShader, DepthMap, TextReader
     EyesCLI/                        the Mac test tool, one mode per file
     Eyes/Memory/                    FaceEmbedder, FaceTracker, ThingEmbedder, BelongingTargeting, MemoryStore,
                                     MemoryEngine, Commands (voice commands), MemoryReplies, PixelWarp
@@ -203,6 +208,15 @@ What each other part is for, and the evidence (one session on the phone: 92 turn
   at someone, the model called them "one object" and described "Person." Rewording the yes/no to
   exclude people was tried: every wording broke something else (one turned 18 real close-ups into
   scenes, another called stairs and blank walls close-ups).
+- **Things are never picked out by colour.** "Which one is the hand soap?" got "Orange bottle.",
+  no use to someone who cannot see it. The cause was the instruction's own example ("Tall green
+  bottle."). Questions that ask for one of several to be picked out now get position and size
+  ("Right one, shorter and rounder.", "Left one, taller bottle."), right on all three sharp frames
+  of that scene; the general example no longer has a colour in it; and "Is it on the left or
+  right?" is answered "Soap on counter, left." instead of "Yes, left." Colour is still given when
+  asked for ("What color is the hand soap?" gets "Orange.") and in descriptions of people's
+  clothes. An example naming a part ("tall with a pump") was tried first and the part turned up
+  on a bottle without one.
 - **The label must be the thing's own.** Told to "read any label on it", the model read one off
   whatever else was in view: a sleep mask held in front of a water bottle came back as "Sleep mask.
   Water." four times running, and the back of an ID card as another university's. "If it has a
@@ -212,6 +226,16 @@ What each other part is for, and the evidence (one session on the phone: 92 turn
 - **No "Your …" in front of a held-up object.** It said "Your water bottle. Sleep mask." three
   times, with the bottle on the desk behind the mask, and never once fired on 13 taps of a bottle
   in the hand.
+- **The user's own thing is the answer when the camera is pointed at it, sure or not.** A jacket
+  taught once (three views from the same moment) matched at 0.61 to 0.72 lying crumpled on a desk,
+  under the 0.70 that makes a match sure, so its outline was drawn ("your jacket?") while the
+  replies ignored it: "Fleece blanket.", "Folded clothes.", and "Red Bull can." for a can beside
+  it. Unsure matches are now spoken, as "Possibly your jacket."; all nine saved from the phone
+  were on the right thing. Pointed at means the middle of the thing's outline is within 0.15 of
+  the middle of the view: in the 23 saved turns with one of the user's things in view it was 0.09
+  or less the 6 times the thing was what was being shown, and 0.20 or more the 17 times it stood
+  beside or behind that. A tap the model calls a close-up now gets that name instead of the
+  model's.
 - **Names at once, unless something is held up.** The yes/no costs time on the phone (about 0.23 s
   when first measured), and waiting for it pushed a recognised name from under 0.1 s after a tap to
   0.8 s. So names are spoken the moment the tap ends, except when LiDAR puts the middle of the view
@@ -241,8 +265,22 @@ What each other part is for, and the evidence (one session on the phone: 92 turn
 - **The recogniser reads the frame from the end of the question, not the start of the press.** On
   the phone, five of seven number questions were answered by it (the same, right number each time)
   and two fell through to the model ("Can't read it."): at the start of those presses the card was
-  half out of view, and in a third it was blurred from being lifted. The model keeps the frame from
-  the start of the press, because reading it is what makes answers fast.
+  half out of view, and in a third it was blurred from being lifted. The model is given a frame at
+  the start of the press, because reading it then is what makes answers fast.
+- **The model is given the sharpest recent frame, not the newest.** The newest frame as the button
+  goes down is often smeared, the phone still coming to rest: at least 13 of the 245 lit press
+  frames saved from the phone were, and the answers about them were wrong ("Blurry photo.",
+  "Clothing fabric.", the wrong one of two bottles, which it got right on the three sharp frames
+  that followed). A frame's sharpness is one number (`Sharpness`, about a millisecond a frame); the
+  smeared frame of the bottles scores 36 and the sharp ones 234, 237 and 246. At the press the model
+  gets the sharpest frame of the last fifth of a second. While the button is held, a frame at least 1.5 times
+  as sharp as the one it has replaces it, twice a turn at most; reading a frame takes two thirds of
+  a second, usually less than the rest of the question. In a session of 23 presses on the phone the
+  frame the model ended with was 2.7 to 6.7 times as sharp as the newest at the press in 9, every
+  one a question about a person, with the phone still swinging up to them as the button went down:
+  the newest frame showed a smeared desk, the one the model got showed the person. Time to first
+  words was unchanged (about 0.6 s after release) and the camera ran out of buffers once. A thing
+  brought into view after the press, with nothing getting sharper, is still missed.
 - **Reading only the largest text, tried and dropped.** It read the name on the card and left out
   the number.
 - **Remembering the previous question, tried and not adopted.** With the last exchange put in front

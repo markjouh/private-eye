@@ -14,6 +14,9 @@ if [ ! -d Vendor/llama.xcframework ]; then
 fi
 
 mkdir -p Models
+# The app bundles Models/eyes-ft-v2-Q4_K_M.gguf (Witness-2B), a fine-tune of LFM3-VL-2B that is not on Hugging Face:
+# copy it from ~/Documents/s26-eyes-lab/models/ (see the README). The stock weights below are still
+# fetched, for comparison in eyes-cli and because the vision projector is shared.
 if [ ! -f Models/LFM3-VL-2B-QAD-Q4_0.gguf ]; then
   hf download LiquidAI/LFM3-VL-2B-GGUF LFM3-VL-2B-QAD-Q4_0.gguf --local-dir Models
   hf download LiquidAI/LFM3-VL-2B-GGUF mmproj-LFM3-VL-2B-Q8_0.gguf --local-dir Models

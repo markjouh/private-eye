@@ -140,4 +140,20 @@ func runCommandsMode(_ args: [String]) {
         print("FAIL  person in \"\(sentence)\"  expected \(String(describing: expected))  got \(String(describing: Commands.personAsked(in: sentence, among: names)))")
     }
     print("\(personCases.count - personFailures)/\(personCases.count) person-question cases pass")
+
+    // Which style of answer a question gets (see AnswerStyle).
+    let styleCases: [(String, AnswerStyle.Kind)] = [
+        ("Which one is the hand soap?", .pick), ("Which bottle is the dish soap?", .pick), ("Which of these is the shampoo?", .pick),
+        ("Which button is my finger on?", .general), ("Which way is the exit?", .locate), ("Which side is the door on?", .locate),
+        ("Is the hand soap on the left or right?", .locate), ("Is it open or closed?", .general), ("Is the door open?", .yesNo),
+        ("Where is the kettle?", .locate), ("What is this?", .object), ("What am I holding?", .object), ("How many chairs are there?", .count),
+        ("What color is the hand soap?", .general), ("Can you tell me what this is?", .object), ("What does the sign say?", .read),
+        ("What is in front of me?", .describe), ("What does he look like?", .person),
+    ]
+    var styleFailures = 0
+    for (question, expected) in styleCases where AnswerStyle.kind(of: question) != expected {
+        styleFailures += 1
+        print("FAIL  style of \"\(question)\"  expected \(expected)  got \(AnswerStyle.kind(of: question))")
+    }
+    print("\(styleCases.count - styleFailures)/\(styleCases.count) answer-style cases pass")
 }

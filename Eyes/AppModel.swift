@@ -95,8 +95,13 @@ final class AppModel: ObservableObject {
     private let proximity = ProximityHaptics()
     private var memory: MemoryEngine?
     private var latestDepth: DepthMap?
-    /// The camera frame from the moment the current press began.
+    /// The camera frame the language model is given this turn: the sharpest from the moment the press
+    /// began, or a clearly sharper one that came while the button was held.
     private var turnFrame: CVPixelBuffer?
+    private var turnFrameSharpness: Float = 0
+    /// The newest frame when the press began, which is what the model used to be given. Kept for the
+    /// debug capture, to compare against.
+    private var turnFrameAtPress: CVPixelBuffer?
     private let latestSnapshot = LatestSnapshot()
     /// The analysed frame from the moment the current press began.
     private var turnSnapshot: Snapshot?
@@ -124,6 +129,13 @@ final class AppModel: ObservableObject {
     private static let tapDuration = 0.35
     private static let quickQuestion = "What is in front of me?"
     private var ingestTask: Task<Void, Error>?
+    /// A frame replaces the one the model has when it is this many times as sharp. Frames of a view
+    /// held still differ by a few percent (three of two bottles by a sink scored 234, 237 and 246);
+    /// the smeared frame of the same view, from the start of a press, scored 36.
+    private static let clearlySharper: Float = 1.5
+    /// At most this many replacements in a turn, so that a phone that never settles cannot keep the
+    /// model reading frames until the question is over.
+    private static let sharperFramesPerTurn = 2
     private var started = false
 
     func start() {
@@ -254,7 +266,8 @@ final class AppModel: ObservableObject {
         turnReleased = Date()
         turnPressSeconds = min(turnReleased.timeIntervalSince(pressStarted), 600)
         let tapped = turnPressSeconds < Self.tapDuration
-        log(String(format: "press released after %.2f s (%@)", turnPressSeconds, tapped ? "tap" : "hold"))
+        log(String(format: "press released after %.2f s (%@); model's frame %.0f, frames now %@", turnPressSeconds, tapped ? "tap" : "hold",
+                   turnFrameSharpness, camera.recentSharpness))
         Task {
             var heard = ""
             if tapped {
@@ -324,7 +337,6 @@ final class AppModel: ObservableObject {
         pacer.modelBusy = true
         turnDetections = allDetections
         turnCenterDistance = centerDistance
-        turnFrame = camera.latestFrame
         turnSnapshot = latestSnapshot.value
         turnFrameRead = nil
         turnRoute = ""
@@ -333,11 +345,48 @@ final class AppModel: ObservableObject {
         turnPressSeconds = 0
         turnAudio = nil
         spokeFirstWords = false
+        // The newest frame is often smeared: the phone is still coming to rest as the button goes
+        // down. Of 245 press frames saved from the phone about 15 were, and the model's answers about
+        // them were wrong ("Blurry photo.", the wrong one of two bottles). So the model gets the
+        // sharpest of the last few frames, and a sharper one still if it comes while the button is held.
+        let newest = camera.latestFrame
+        let sharpest = camera.sharpestRecentFrame()
+        turnFrameAtPress = DebugCapture.shared.isEnabled ? newest : nil
+        show(sharpest)
+        if let sharpest {
+            log(String(format: "frame: sharpness %.0f, %.0f ms old%@, of %@%@", sharpest.sharpness,
+                       Date().timeIntervalSince(sharpest.date) * 1000, sharpest.buffer === newest ? "" : " (not the newest)",
+                       camera.recentSharpness, camera.droppedFrames > 0 ? "; camera out of buffers \(camera.droppedFrames) times" : ""))
+        }
+        watchForSharperFrame(turn: turn)
+    }
+
+    /// Gives the language model `frame` to look at for this turn, in place of any it had.
+    private func show(_ frame: ScoredFrame?) {
+        turnFrame = frame?.buffer
+        turnFrameSharpness = frame?.sharpness ?? 0
         let vlm = vlm
-        let image = camera.latestCGImage()
+        let image = frame.flatMap { camera.cgImage(of: $0.buffer) }
         ingestTask = Task {
             guard let image else { throw LLMError("no camera frame yet") }
             try await vlm.ingest(image)
+        }
+    }
+
+    /// While the button is held the phone steadies, or the thing asked about is brought into view. A
+    /// frame clearly sharper than the one the model has replaces it. Reading a frame takes the model
+    /// two thirds of a second, which is usually over before the question is.
+    private func watchForSharperFrame(turn: Int) {
+        Task {
+            var replaced = 0
+            while replaced < Self.sharperFramesPerTurn {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard turn == self.turn, phase == .listening else { return }
+                guard let frame = camera.sharpestRecentFrame(), frame.sharpness > Self.clearlySharper * turnFrameSharpness else { continue }
+                log(String(format: "sharper frame: %.0f, was %.0f", frame.sharpness, turnFrameSharpness))
+                replaced += 1
+                show(frame)
+            }
         }
     }
 
@@ -377,9 +426,8 @@ final class AppModel: ObservableObject {
             let mine = await ownThings(in: turnSnapshot)
             guard turn == self.turn else { return }
             turnBelongings = mine
-            if let thing = MemoryReplies.pointedAt(mine.filter { !$0.tentative }),
-               hypot(thing.box.midX - 0.5, thing.box.midY - 0.5) < 0.3 {
-                say("Your \(thing.name).", source: "memory")
+            if let reply = MemoryReplies.thisIs(mine) {
+                say(reply, source: "memory")
                 return
             }
         }
@@ -426,7 +474,10 @@ final class AppModel: ObservableObject {
         let single = await closeUp
         guard turn == self.turn else { return }
         turnBelongings = mine
-        if single {
+        if single, let reply = MemoryReplies.thisIs(mine) {
+            // A close-up of one of the user's own things: its name is the answer.
+            say(reply, source: "memory")
+        } else if single {
             // The scene, and whoever and whatever else is in it, is not what is being asked about.
             // (Prefacing this with one of the user's own things seen near the middle was tried: it
             // said "Your water bottle. Sleep mask." with the bottle on the desk behind the mask.)
@@ -674,7 +725,14 @@ final class AppModel: ObservableObject {
             belongings: turnBelongings.map { .init($0.name, $0.box, confidence: $0.score, distance: $0.distance, note: $0.tentative ? "tentative" : nil) },
             knownPeople: memory?.store.people.map(\.name) ?? [], knownThings: memory?.store.belongings.map(\.name) ?? [],
             notes: turnNotes)
-        DebugCapture.shared.save(record, frame: turnFrameRead ?? turnSnapshot?.frame ?? turnFrame, depth: turnSnapshot?.depth, audio: turnAudio)
+        // The frame the answer came from: the one the text recogniser read, the one the model was
+        // given, or for a reply built from memory or the detector, the one their outlines are on.
+        let analysed = ["memory", "detector"].contains(record.route) ? turnSnapshot?.frame : nil
+        let frame = turnFrameRead ?? analysed ?? turnFrame ?? turnSnapshot?.frame
+        // And the newest frame at the press, when the model was given another.
+        let atPress = frame === turnFrame && turnFrameAtPress !== frame ? turnFrameAtPress : nil
+        DebugCapture.shared.save(record, frame: frame, atPress: atPress, depth: turnSnapshot?.depth, audio: turnAudio)
+        turnFrameAtPress = nil
         turnAudio = nil
     }
 

@@ -78,6 +78,19 @@ enum MemoryReplies {
         found.min { hypot($0.box.midX - 0.5, $0.box.midY - 0.5) < hypot($1.box.midX - 0.5, $1.box.midY - 0.5) }
     }
 
+    /// The centre of a thing's outline is within this of the middle of the view (as a fraction of the
+    /// view) when the camera is pointed at it. Of 23 turns saved from the phone with one of the user's
+    /// things in view, it was what the camera was pointed at in 6, 0.09 or less from the middle each
+    /// time, and beside or behind that (a bottle on the desk behind a mask held up) in 17, 0.20 or more.
+    static let pointedWithin = 0.15
+
+    /// "Your jacket." when the camera is pointed at one of the user's things, "Possibly your jacket."
+    /// when the match is an unsure one. Nil when it is pointed at none of them.
+    static func thisIs(_ found: [FoundBelonging]) -> String? {
+        guard let thing = pointedAt(found), hypot(thing.box.midX - 0.5, thing.box.midY - 0.5) <= pointedWithin else { return nil }
+        return thing.tentative ? "Possibly your \(thing.name)." : "Your \(thing.name)."
+    }
+
     /// Answer to "Whose bottle is this?" / "Is this mine?".
     static func whose(_ found: [FoundBelonging]) -> String {
         guard let thing = pointedAt(found) else { return "Not one I know." }

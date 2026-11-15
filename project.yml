@@ -24,7 +24,7 @@ targets:
         buildPhase: sources
       - path: Models/dinov3_s.mlpackage
         buildPhase: sources
-      - path: Models/LFM3-VL-2B-QAD-Q4_0.gguf
+      - path: Models/eyes-ft-v2-Q4_K_M.gguf
         buildPhase: resources
       - path: Models/mmproj-LFM3-VL-2B-Q8_0.gguf
         buildPhase: resources

@@ -74,6 +74,10 @@ final class LLMEngine {
     /// largely ignores the same words in the system prompt. Set it to take over the style of a call:
     /// the reply then comes back exactly as generated, with no `AnswerStyle` filtering.
     var questionSuffix = LLMEngine.defaultQuestionSuffix
+    /// True when the loaded model was fine-tuned to answer the question alone (Witness-2B; see
+    /// `AnswerStyle.answersBareQuestion`). With `questionSuffix` nil, no instruction is then appended
+    /// and the reply is spoken as generated, apart from the rules about people.
+    var bareQuestions = false
     /// LFM3 reasons inside <think> tags before answering when enabled. Slower; off by default.
     var thinking = false
     private(set) var stats = LLMStats()
@@ -107,6 +111,7 @@ final class LLMEngine {
         }
         self.model = model
         vocab = llama_model_get_vocab(model)
+        bareQuestions = AnswerStyle.answersBareQuestion(modelFile: (modelPath as NSString).lastPathComponent)
 
         var cparams = llama_context_default_params()
         cparams.n_ctx = 4096
@@ -226,10 +231,16 @@ final class LLMEngine {
         let think = thinking ? "<think>" : "<think></think>"
         let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind = kind ?? AnswerStyle.kind(of: asked)
-        var filter = questionSuffix == nil ? AnswerStyle.Filter(kind: kind) : nil
-        let instruction = questionSuffix ?? AnswerStyle.suffix(for: kind)
+        // A model trained on bare questions gets the question alone; 160 tokens is the cap its
+        // answers were measured with (text read aloud keeps its longer one).
+        // The exception is a scene whose people the app has already announced (`.describeThings`):
+        // asked bare, the model named them again in 40 of 70 tap replies ("Person ahead. Person seated
+        // on the right..."), so that one request keeps its instruction not to mention people.
+        let bare = questionSuffix == nil && bareQuestions && kind != .describeThings
+        var filter = questionSuffix == nil ? AnswerStyle.Filter(kind: kind, peopleOnly: bare) : nil
+        let instruction = questionSuffix ?? (bare ? "" : AnswerStyle.suffix(for: kind))
         let suffix = instruction.isEmpty ? "" : "\n\(instruction)"
-        let limit = maxTokens ?? (questionSuffix == nil ? AnswerStyle.maxTokens(for: kind) : 160)
+        let limit = maxTokens ?? (questionSuffix != nil ? 160 : bare ? max(160, AnswerStyle.maxTokens(for: kind)) : AnswerStyle.maxTokens(for: kind))
         let prompt = "\(asked)\(suffix)<|im_end|>\n<|im_start|>assistant\n\(think)"
         stats.questionTokens = try eval(prompt, bitmaps: [], logitsLast: true)
 

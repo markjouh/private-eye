@@ -19,13 +19,16 @@ import Foundation
 ///    and never a name the user has not taught us.
 /// 8. A limit is stated once, plainly: "Can't judge crossing." No apology, no "please", and advice
 ///    only where safety depends on it.
+/// 9. Never pick a thing out by its colour: "the orange bottle" is no use to someone who cannot see
+///    it. Say where it is and how it differs to the hand: "Right one, shorter and rounder." Colour is
+///    for when it is asked about, and for describing a person's clothes.
 ///
 /// LFM3-VL follows an instruction placed after the question, and copies the shape of an example given
 /// there, so each kind of question gets its own suffix. `Filter` then enforces the rules on the text
 /// as it streams, because the model still slips into full sentences.
 enum AnswerStyle {
     enum Kind {
-        case read, count, locate, yesNo, person, describe, describeThings, object, general
+        case read, count, locate, pick, yesNo, person, describe, describeThings, object, general
     }
 
     /// Sets the register; on its own the model mostly ignores it, but it tightens what the suffixes get.
@@ -40,6 +43,15 @@ enum AnswerStyle {
     /// What a tap asks when the answer to that is yes.
     static let objectQuestion = "What is this?"
 
+    /// True for a model file that was fine-tuned to answer the question alone in the house style, so
+    /// it is sent no instruction and its reply is spoken as generated (`Filter` then only enforces
+    /// rule 7, about people). Witness-2B (`eyes-ft-v2`) is one: on 500 VizWiz photos it got 332 right
+    /// and invented 9 answers asked that way, against 312 and 16 with the suffixes below, which it was
+    /// not trained on. The stock model and `eyes-ft-v1` still need the suffixes.
+    static func answersBareQuestion(modelFile: String) -> Bool {
+        modelFile.hasPrefix("eyes-ft-v2")
+    }
+
     /// What sort of answer `question` calls for. Order matters: "Can you read this?" is reading, not yes/no.
     static func kind(of question: String) -> Kind {
         // A polite wrapper is not the question: "Can you tell me what this is?" asks what it is, and
@@ -52,9 +64,18 @@ enum AnswerStyle {
             return .read
         }
         if has(#"^how many\b"#) { return .count }
-        if has(#"^what('s| is| are) (this|that|it|these|those)( thing| object| item)?[\s?.!]*$"#) || has(#"^what am i holding\b"#) { return .object }
-        if has(#"^(where|which side)\b"#) || has(#"\b(where is|where are|where's|find)\b"#) { return .locate }
-        if has(#"^(is|are|am|do|does|did|can|could|was|were|has|have|will|should|if|whether)\b"#) { return .yesNo }
+        if has(#"^what('s| is| are) (this|that|it|these|those)( thing| object| item)?[\s?.!]*$"#)
+            || has(#"^what (this|that|it|these|those) (is|are)[\s?.!]*$"#) || has(#"^what am i holding\b"#) { return .object }
+        if has(#"^(where|which (side|way|direction))\b"#) || has(#"\b(where is|where are|where's|find)\b"#) { return .locate }
+        // "Is the soap on the left or right?" asks where, not whether: as yes/no it came back "Yes, left."
+        if has(#"\b(left or right|right or left)\b"#) { return .locate }
+        // "Which one is the hand soap?" asks to have one of several picked out. A question that ends
+        // on a preposition asks what something is instead ("Which button is my finger on?").
+        if has(#"^which\b"#) && !has(#"\b(on|in|at|to|under|near|with|for|from)[\s?.!]*$"#) { return .pick }
+        if has(#"^(is|are|am|do|does|did|can|could|was|were|has|have|will|should|if|whether)\b"#) {
+            // "Is it open or closed?" is a choice between two answers, not a yes or a no.
+            return has(#"\bor\b"#) ? .general : .yesNo
+        }
         let aboutSomeone = has(#"\b(person|people|man|woman|guy|girl|boy|lady|kid|child|he|she|him|her|they|them|someone|somebody)\b"#)
         if has(#"^who\b|\bwho( is|'s| are)\b"#) || (aboutSomeone && has(#"\b(looks? like|describe|appearance)\b"#)) {
             return .person
@@ -76,6 +97,10 @@ enum AnswerStyle {
             "Answer with the number and what, like \"Three umbrellas.\""
         case .locate:
             "Name it and say where it is in a few words with left, right or ahead, like \"Hat on shelf, left.\" If it is not in view, say \"Not visible.\""
+        case .pick:
+            // The example gives a size and nothing else: one with a part in it ("tall with a pump")
+            // had that part turn up on things that do not have one.
+            "Say which one by where it is and its shape or size, not its color, like \"The left one, the shorter one.\""
         case .yesNo:
             "Answer yes or no, then a few words, like \"Yes, on shelf, left.\" or \"No.\""
         case .person:
@@ -93,7 +118,9 @@ enum AnswerStyle {
             // held in front of a water bottle came back as "Sleep mask. Water."
             "Say what it is. If it has a label of its own, read it, like \"Shampoo bottle, Head and Shoulders, 13 ounces.\""
         case .general:
-            "Answer in a short, specific phrase, like \"Tall green bottle.\" or \"Reading a book.\""
+            // The first example used to be "Tall green bottle.", and answers came back as colours:
+            // asked which bottle was the hand soap, "Orange bottle."
+            "Answer in a short, specific phrase, like \"Round metal tin.\" or \"Reading a book.\""
         }
     }
 
@@ -102,6 +129,7 @@ enum AnswerStyle {
         switch kind {
         case .read: (.max, .max)
         case .describe, .describeThings: (2, 10)
+        case .pick: (1, 10)
         case .object: (2, 20)   // a name, then its label: a sign's can be a dozen words
         case .person: (2, 16)   // room for two people
         default: (1, 8)
@@ -123,6 +151,9 @@ enum AnswerStyle {
     /// generated; it returns whole sentences, ready to speak. Reading aloud passes through untouched.
     struct Filter {
         private let kind: Kind
+        /// For a model that already answers in the house style: nothing is shortened or compressed,
+        /// only the words about people that rule 7 forbids are taken out.
+        private let peopleOnly: Bool
         private let limits: (sentences: Int, words: Int)
         private var buffer = ""
         private var sentences = 0
@@ -130,9 +161,10 @@ enum AnswerStyle {
         /// True once the reply is as long as its kind allows: stop generating.
         private(set) var isDone = false
 
-        init(kind: Kind) {
+        init(kind: Kind, peopleOnly: Bool = false) {
             self.kind = kind
-            limits = AnswerStyle.limits(for: kind)
+            self.peopleOnly = peopleOnly
+            limits = peopleOnly ? (.max, .max) : AnswerStyle.limits(for: kind)
         }
 
         mutating func feed(_ text: String) -> String {
@@ -173,7 +205,8 @@ enum AnswerStyle {
             // The model sometimes answers "where" with a bounding box.
             let text = AnswerStyle.replace(#"\[\s*[\d.]+(\s*,\s*[\d.]+){3}\s*\]"#, in: sentence, with: "")
             var kept: [String] = []
-            for raw in text.components(separatedBy: CharacterSet(charactersIn: ",;")) {
+            // A sentence from a model that speaks the house style is kept whole, commas and all.
+            for raw in peopleOnly ? [text] : text.components(separatedBy: CharacterSet(charactersIn: ",;")) {
                 let phrase = telegraphic(raw)
                 guard !phrase.isEmpty else { continue }
                 let count = phrase.split(separator: " ").count
@@ -189,13 +222,20 @@ enum AnswerStyle {
             sentences += 1
             if sentences >= limits.sentences { isDone = true }
             let joined = kept.joined(separator: ", ")
-            return (sentences > 1 ? " " : "") + joined.prefix(1).uppercased() + String(joined.dropFirst()) + "."
+            // A sentence kept whole may already close itself inside a quotation: “TRASH.”
+            let closed = peopleOnly && joined.range(of: #"[.!?]["”’)]+$"#, options: .regularExpression) != nil
+            // ...and keeps a first letter the model wrote small ("iPad showing an app store page.").
+            let keepsCase = peopleOnly && sentence.trimmingCharacters(in: .whitespacesAndNewlines).first?.isLowercase == true
+            let first = keepsCase ? String(joined.prefix(1)) : joined.prefix(1).uppercased()
+            return (sentences > 1 ? " " : "") + first + String(joined.dropFirst()) + (closed ? "" : ".")
         }
 
         /// A phrase (the text between two commas) with the scaffolding taken out.
         private func telegraphic(_ phrase: String) -> String {
             var s = phrase.trimmingCharacters(in: CharacterSet(charactersIn: " \n\t.!?:\"*"))
-            for (pattern, replacement) in AnswerStyle.rewrites { s = AnswerStyle.replace(pattern, in: s, with: replacement) }
+            for (pattern, replacement) in peopleOnly ? AnswerStyle.peopleRewrites : AnswerStyle.rewrites {
+                s = AnswerStyle.replace(pattern, in: s, with: replacement)
+            }
             return AnswerStyle.replace(#"\s{2,}"#, in: s, with: " ").trimmingCharacters(in: CharacterSet(charactersIn: " -"))
         }
     }
@@ -228,7 +268,11 @@ enum AnswerStyle {
         (#"(?i)(?<!half )\b(a|an|the)\s+(?!(few|little|lot|couple|bit)\b)"#, ""),
         (#"(?i)^(your|my)\s+"#, ""),
         (#"(?i)\b(is|are)\s+(?=(on|in|at|under|above|below|behind|beside|near|next|between|inside|left|right|ahead|not|half|[a-z]+ing)\b|\d)"#, ""),
-        // People: no ethnicity, skin colour or age (rule 7). "Boy" and "girl" are guesses at age too.
+    ] + peopleRewrites
+
+    /// People: no ethnicity, skin colour or age (rule 7). "Boy" and "girl" are guesses at age too.
+    /// Applied to every generated reply, including those of a model that needs no other filtering.
+    private static let peopleRewrites: [(String, String)] = [
         (#"(?i)\b(boy|girl)\b"#, "person"),
         (#"(?i)\b(boys|girls)\b"#, "people"),
         (#"(?i)\b(?:(?:young|younger|old|older|elderly|middle[- ]aged|teenage|senior|asian|caucasian|african[- ]american|african|hispanic|latino|latina|indian|middle[- ]eastern|european|white|black)[ ,]+)+(?="# + personNoun + #"\b)"#, ""),
